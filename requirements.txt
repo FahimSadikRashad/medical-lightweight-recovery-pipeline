@@ -1,0 +1,12 @@
+# Core. medmnistc and wand are installed by scripts/install.sh, which has to
+# order them around the system ImageMagick package.
+torch>=2.0
+torchvision>=0.15
+medmnist>=3.0
+torchmetrics>=1.0
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+scikit-learn>=1.3
+Pillow>=9.0
+tqdm>=4.65

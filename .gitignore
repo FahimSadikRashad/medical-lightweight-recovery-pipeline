@@ -1,0 +1,14 @@
+# experiment outputs -- regenerate with scripts/, don't commit
+runs/
+*.pt
+*.pth
+
+# results/figures are reproducible; commit deliberately if a paper needs them pinned
+*.npz
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+.DS_Store

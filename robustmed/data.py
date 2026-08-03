@@ -22,9 +22,15 @@ CLEAN = "clean"
 
 
 def to_tensor01(img):
-    """PIL image or uint8 HWC array -> float CHW tensor in [0, 1]."""
-    a = np.asarray(img)
-    return torch.from_numpy(np.ascontiguousarray(a)).float().permute(2, 0, 1) / 255.0
+    """PIL image or uint8 HWC array -> float CHW tensor in [0, 1].
+
+    copy=True is required, not defensive: medmnist returns read-only arrays and
+    np.ascontiguousarray passes those straight through, so torch.from_numpy
+    warns about a non-writable tensor on every single sample. The copy is 12 KB
+    per 64x64 image.
+    """
+    a = np.array(img, order="C", copy=True)
+    return torch.from_numpy(a).float().permute(2, 0, 1) / 255.0
 
 
 def label_of(lab):

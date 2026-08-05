@@ -3,6 +3,9 @@ runs/
 *.pt
 *.pth
 
+# downloaded corpora and their caches -- scripts/prepare_*.py regenerates these
+data/
+
 # results/figures are reproducible; commit deliberately if a paper needs them pinned
 *.npz
 

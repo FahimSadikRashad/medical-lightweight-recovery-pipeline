@@ -28,13 +28,18 @@ if __name__ == "__main__":
     print(f"training severities:  {config.TRAIN_SEVERITIES} "
           f"(severity {config.HOLDOUT_SEVERITY} held out)")
 
+    # Built once and reused for every width: the corrupted val set is
+    # deterministic, and re-rendering it each epoch would cost more than training.
+    val_probe = engine.make_val_probe(val)
+
     print("\n== capacity sweep ==")
     for w in config.AE_WIDTHS:
         print(f"width={w:3d}  params={models.count_params(models.ConvAE(w)):,}")
 
     for w in config.AE_WIDTHS:
         print(f"\n-- training width={w} --")
-        engine.train_recovery(w, clf, pair_loader, epochs=config.AE_EPOCHS)
+        engine.train_recovery(w, clf, pair_loader, epochs=config.AE_EPOCHS,
+                              val_probe=val_probe)
 
     print("\n== reconstruction quality (report, but do not select on it) ==")
     val_pairs = data.loader(

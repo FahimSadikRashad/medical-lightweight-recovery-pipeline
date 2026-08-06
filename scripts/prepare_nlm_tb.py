@@ -116,25 +116,39 @@ def main():
         raise SystemExit(f"no images found under {raw_dir} -- extraction failed?")
 
     print(f"\n== decode + resize to {args.size}x{args.size} ==")
-    imgs, labels, sources, modes = [], [], [], collections.Counter()
+    imgs, imgs_cc, labels, sources = [], [], [], []
+    modes = collections.Counter()
     for i, (path, label, src) in enumerate(items):
         with Image.open(path) as im:
             modes[im.mode] += 1
-            # identical to data.Kermany: bare resize, so PIL's default
-            # (BICUBIC for RGB) applies in both paths
-            arr = np.array(im.convert("RGB").resize((args.size,) * 2))
-        imgs.append(arr)
+            rgb = im.convert("RGB")
+            # "images": identical to data.Kermany -- bare resize, so PIL's
+            # default (BICUBIC) applies in both paths. Note this SQUASHES a
+            # 4020x4892 radiograph into a square.
+            imgs.append(np.array(rgb.resize((args.size,) * 2)))
+            # "images_cc": center square crop first. PneumoniaMNIST's source
+            # films are already cropped to the chest and MedMNIST center-crops
+            # before resizing, so the squashed variant above presents both a
+            # distorted aspect ratio and collimation border that the classifier
+            # never saw in training. Caching both lets the transfer experiment
+            # test whether a null result is domain shift or preprocessing.
+            w0, h0 = rgb.size
+            s = min(w0, h0)
+            box = ((w0 - s) // 2, (h0 - s) // 2, (w0 + s) // 2, (h0 + s) // 2)
+            imgs_cc.append(np.array(rgb.crop(box).resize((args.size,) * 2)))
         labels.append(label)
         sources.append(src)
         if (i + 1) % 100 == 0:
             print(f"  {i + 1}/{len(items)}", flush=True)
 
     imgs = np.stack(imgs).astype("uint8")
+    imgs_cc = np.stack(imgs_cc).astype("uint8")
     labels = np.array(labels, dtype="int64")
     sources = np.array(sources)
 
     npz = out_dir / f"nlm_tb_{args.size}.npz"
-    np.savez_compressed(npz, images=imgs, labels=labels, sources=sources)
+    np.savez_compressed(npz, images=imgs, images_cc=imgs_cc,
+                        labels=labels, sources=sources)
 
     # --- report -----------------------------------------------------------
     print(f"\nsource modes: {dict(modes)}")
@@ -164,6 +178,9 @@ def main():
         print(f"\nremoved source zips (--keep-zips to retain)")
 
     print(f"\nsaved -> {npz}  ({npz.stat().st_size / 1e6:.1f} MB)")
+    print("  images     squashed to square (matches data.Kermany)")
+    print("  images_cc  center-cropped to square first -- try this if the "
+          "classifier\n             sits at chance on clean external data")
     print("\nUpload that one file to Colab; scripts/10_external_transfer.py "
           "reads it directly.")
     print("\nReminder: label 1 is TUBERCULOSIS-abnormal, not pneumonia. Transfer "

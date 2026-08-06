@@ -43,6 +43,18 @@ AE_RESIDUAL = False
 AE_LAMBDA_MAX = 1.5
 AE_WARMUP = 2
 
+# The CE term has a trivial minimiser: because the dataset is imbalanced, an AE
+# that emits anything the classifier confidently labels the majority class
+# scores low CE without restoring anything. At LAMBDA_MAX=1.5 that shortcut wins
+# on roughly one seed in three, and because training saved the FINAL epoch the
+# collapsed weights were the ones kept. These two knobs are the fix.
+AE_SELECT_BEST = True         # keep the best epoch by validation balanced accuracy
+VAL_PROBE_N = 256             # val images per condition in the selection probe
+
+# Stability sweep (scripts/11_stability.py)
+AE_SEEDS = [0, 1, 2]
+AE_LAMBDAS = [0.0, 0.25, 0.5, 1.0, 1.5]   # 0.0 doubles as the MSE-only ablation
+
 TRAIN_CORRUPTIONS = ["gaussian_noise", "gaussian_blur", "jpeg_compression"]
 TRAIN_SEVERITIES = [0, 1, 2]
 HOLDOUT_SEVERITY = 4          # never seen while training recovery
@@ -68,5 +80,18 @@ BASELINE1_CKPT = CKPT_DIR / "baseline1_frozen.pt"
 BASELINE2_CKPT = CKPT_DIR / "baseline2_augmented.pt"
 
 
-def ae_ckpt(width):
-    return CKPT_DIR / f"recovery_ae_w{width}.pt"
+def ae_ckpt(width, seed=None, tag=None):
+    """Recovery AE checkpoint path.
+
+    seed=None and tag=None reproduce the original single-run filename, so
+    existing checkpoints keep loading. Passing either scopes the file, which is
+    what lets a sweep over seeds/lambdas/residual run without runs silently
+    overwriting each other -- the failure that made the first multi-seed result
+    look like a capacity finding.
+    """
+    parts = [f"recovery_ae_w{width}"]
+    if seed is not None:
+        parts.append(f"s{seed}")
+    if tag:
+        parts.append(tag)
+    return CKPT_DIR / ("_".join(parts) + ".pt")

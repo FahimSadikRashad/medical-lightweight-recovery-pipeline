@@ -19,6 +19,7 @@ STACKED = "recovery_plus_aug"
 COMPOUND = "compound_corruptions"
 TRANSFER = "kermany_transfer"
 DATASET_STATS = "dataset_stats"
+STABILITY = "stability"
 
 
 def save(name, payload):

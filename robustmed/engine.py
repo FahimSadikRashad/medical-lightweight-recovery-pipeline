@@ -106,6 +106,51 @@ def reconstruction_quality(ae, pair_loader, max_batches=10):
     return {"psnr": float(np.mean(ps)), "ssim": float(np.mean(ss))}
 
 
+def make_val_probe(raw, corruptions=None, severities=None, n=None):
+    """Pre-render a fixed corrupted validation set ONCE, as uint8.
+
+    Model selection needs a validation score after every epoch, and re-rendering
+    corruptions through ImageMagick each time would cost more than the training
+    step itself. The corrupted set is deterministic given (image, corruption,
+    severity), so it is built once and reused for every epoch, width and seed.
+    ~12 KB per image: 256 images x 9 conditions is under 60 MB.
+
+    Returns (x_uint8 [N,3,H,W], y [N]).
+    """
+    from .corruptions import corrupt
+
+    corruptions = corruptions or config.TRAIN_CORRUPTIONS
+    severities = severities or config.TRAIN_SEVERITIES
+    n = n or config.VAL_PROBE_N
+
+    xs, ys = [], []
+    for i in range(min(n, len(raw))):
+        img, lab = raw[i]
+        for name in corruptions:
+            for sev in severities:
+                xs.append(torch.from_numpy(corrupt(img, name, sev)))
+                ys.append(data.label_of(lab))
+    x = torch.stack(xs).permute(0, 3, 1, 2).contiguous()
+    print(f"val probe: {x.shape[0]} images "
+          f"({len(corruptions)} corruptions x {len(severities)} severities)")
+    return x, torch.tensor(ys)
+
+
+@torch.no_grad()
+def probe_balanced(ae, clf, x_uint8, y, batch_size=256):
+    """Balanced accuracy of (ae -> clf) on the cached probe set.
+
+    Balanced accuracy specifically: a collapsed AE still scores near the majority
+    rate on raw accuracy, which is exactly the signal we need selection to reject.
+    """
+    ae.eval()
+    preds = []
+    for i in range(0, len(y), batch_size):
+        xb = x_uint8[i:i + batch_size].to(DEVICE).float() / 255.0
+        preds += clf(ae(xb)).argmax(1).cpu().tolist()
+    return float(balanced_accuracy_score(y.numpy(), np.array(preds)))
+
+
 @torch.no_grad()
 def latency_ms(model, batch_size=1, iters=200, warmup=20):
     """Per-image latency using CUDA events with explicit syncs.
@@ -164,18 +209,33 @@ def train_classifier(model, train_loader, val_loader, ckpt_path,
 
 def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                    lr=config.AE_LR, lambda_max=config.AE_LAMBDA_MAX,
-                   warmup=config.AE_WARMUP, residual=config.AE_RESIDUAL):
+                   warmup=config.AE_WARMUP, residual=config.AE_RESIDUAL,
+                   val_probe=None, seed=None, tag=None):
     """Perceptual-loss autoencoder: MSE(recon, clean) + lam * CE(clf(recon), y).
 
     lam is 0 for the first `warmup` epochs then ramps to lambda_max. Pure MSE
     (lambda_max=0) converges to the identity map and recovers nothing.
+
+    Pass val_probe=(x_uint8, y) from make_val_probe to enable best-epoch
+    selection. This is not a refinement: the CE term has a degenerate minimiser
+    (emit whatever the classifier calls the majority class), and a run that falls
+    into it late in training used to be saved anyway, because only the final
+    epoch was kept. Selection keeps the best epoch by validation balanced
+    accuracy instead, and records the full curve so a collapse is visible after
+    the fact rather than invisible.
     """
+    import copy
+
     from .models import ConvAE
 
     ae = ConvAE(width, residual=residual).to(DEVICE)
     opt = torch.optim.Adam(ae.parameters(), lr=lr)
     mse, ce = nn.MSELoss(), nn.CrossEntropyLoss()
     frozen_clf.eval()
+
+    select = val_probe is not None and config.AE_SELECT_BEST
+    best = {"bal": -1.0, "state": None, "epoch": 0}
+    history = []
 
     for ep in range(epochs):
         lam = 0.0 if ep < warmup else lambda_max * (ep - warmup + 1) / max(1, epochs - warmup)
@@ -190,17 +250,38 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
             opt.step()
             total += loss.item() * cor.size(0)
             seen += cor.size(0)
-        print(f"  [w={width}] ep{ep+1}/{epochs} lam={lam:.2f} loss={total/seen:.4f}")
 
-    torch.save({"model": ae.state_dict(), "width": width, "residual": residual},
-               config.ae_ckpt(width))
-    print(f"saved -> {config.ae_ckpt(width)}")
+        row = {"epoch": ep + 1, "lam": lam, "loss": total / seen}
+        msg = f"  [w={width}] ep{ep+1}/{epochs} lam={lam:.2f} loss={row['loss']:.4f}"
+        if val_probe is not None:
+            row["val_bal"] = probe_balanced(ae, frozen_clf, *val_probe)
+            msg += f" val_bal={row['val_bal']:.4f}"
+            if select and row["val_bal"] > best["bal"]:
+                best = {"bal": row["val_bal"],
+                        "state": copy.deepcopy(ae.state_dict()),
+                        "epoch": ep + 1}
+                msg += " *"
+        history.append(row)
+        print(msg, flush=True)
+
+    if select and best["state"] is not None:
+        ae.load_state_dict(best["state"])
+        print(f"  [w={width}] selected epoch {best['epoch']} "
+              f"(val_bal={best['bal']:.4f}) of {epochs}")
+
+    path = config.ae_ckpt(width, seed=seed, tag=tag)
+    torch.save({"model": ae.state_dict(), "width": width, "residual": residual,
+                "seed": seed, "tag": tag, "lambda_max": lambda_max,
+                "selected_epoch": best["epoch"] if select else epochs,
+                "history": history}, path)
+    print(f"saved -> {path}")
+    ae.eval()
     return ae
 
 
-def load_recovery(width):
+def load_recovery(width, seed=None, tag=None):
     from .models import ConvAE
-    ck = torch.load(config.ae_ckpt(width), map_location=DEVICE)
+    ck = torch.load(config.ae_ckpt(width, seed=seed, tag=tag), map_location=DEVICE)
     ae = ConvAE(ck["width"], residual=ck["residual"]).to(DEVICE)
     ae.load_state_dict(ck["model"])
     ae.eval()

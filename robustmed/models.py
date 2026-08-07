@@ -203,7 +203,14 @@ def build_recovery(arch="convae", width=16, device="auto", **kw):
         learned = _learned()
         if arch not in learned:
             raise KeyError(f"unknown arch {arch!r}; have {sorted(ARM_NAMES)}")
-        module = learned[arch](width=width, **kw)
+        cls = learned[arch]
+        if width is None:
+            # Published configuration -- what the paper actually reports. Scaled
+            # variants are a different claim and must be labelled as such.
+            kw = {**getattr(cls, "PUBLISHED", {}), **kw}
+            module = cls(**kw)
+        else:
+            module = cls(width=width, **kw)
 
     if module is not None and device is not None:
         if device == "auto":

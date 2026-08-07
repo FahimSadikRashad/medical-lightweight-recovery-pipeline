@@ -48,6 +48,9 @@ if __name__ == "__main__":
     args = parse_args(
         arms={"nargs": "+", "default": list(models.ARM_NAMES)},
         widths={"type": int, "nargs": "+", "default": [4, 16, 32]},
+        published={"action": "store_true",
+                   "help": "build each arm at its paper's configuration "
+                           "(Stage 2a) instead of sweeping widths"},
         seeds={"type": int, "nargs": "+", "default": [0, 1, 2]},
         lam={"type": float, "default": config.AE_LAMBDA_MAX},
         output={"default": config.RECOVERY_OUTPUT,
@@ -56,6 +59,10 @@ if __name__ == "__main__":
     train, val, test, info, n_classes = setup(args)
     if args.epochs:
         config.AE_EPOCHS = args.epochs
+    # Stage 2a: width=None makes build_recovery use each class's PUBLISHED dict.
+    # These are reference rows -- the ceiling each concept reaches when it is not
+    # compressed -- not entries in the compute-bounded comparison.
+    widths = [None] if args.published else args.widths
 
     clf = frozen_baseline1(n_classes)
     conds = [data.condition(n, s) for n in corruptions.names()
@@ -76,8 +83,13 @@ if __name__ == "__main__":
     learned = [a for a in args.arms if a in models.LEARNED_NAMES]
     fixed = [a for a in args.arms if a in models.NON_LEARNED]
     print(f"\ngrid: {len(fixed)} non-learned + {len(learned)} learned x "
-          f"{len(args.widths)} widths x {len(args.seeds)} seeds = "
-          f"{len(fixed) + len(learned) * len(args.widths) * len(args.seeds)} models")
+          f"{len(widths)} config(s) x {len(args.seeds)} seeds = "
+          f"{len(fixed) + len(learned) * len(widths) * len(args.seeds)} models")
+    if args.published:
+        for a in learned:
+            m = models.build_recovery(a, width=None)
+            print(f"    {a:8s} {models.count_params(m):>11,} params  "
+                  f"{getattr(type(m), 'PUBLISHED', 'default')}")
 
     rows, raw = [], {"baseline1": b1_raw}
 
@@ -88,7 +100,8 @@ if __name__ == "__main__":
         n_collapsed = sum(engine.collapsed(v) for v in res.values())
         worst_c, worst_v = engine.worst_case(bal, conds)
         row = {
-            "arm": arch, "width": width, "seed": seed, "key": key,
+            "arm": arch, "width": "published" if width is None else width,
+            "seed": seed, "key": key,
             "params": models.count_params(module),
             "worst_abs": worst_v, "worst_condition": worst_c,
             "worst_gain": worst_v - b1[worst_c],
@@ -118,10 +131,10 @@ if __name__ == "__main__":
         score(arch, arch, 0, -1, models.build_recovery(arch))
 
     for arch in learned:
-        for w in args.widths:
+        for w in widths:
             for seed in args.seeds:
                 tag = f"lam{args.lam:g}_{args.output}"
-                key = f"{arch}_w{w}_s{seed}"
+                key = f"{arch}_{'published' if w is None else f'w{w}'}_s{seed}"
                 print(f"\n-- {key} --", flush=True)
                 if config.ae_ckpt(w, seed=seed, tag=tag, arch=arch).exists():
                     module = engine.load_recovery(w, seed=seed, tag=tag, arch=arch)
@@ -200,7 +213,7 @@ if __name__ == "__main__":
         neg = [c.replace("gain_", "") for c in gain_cols
                if getattr(r, c, 0) is not None and getattr(r, c, 0) < 0]
         flag = f"  HARMS: {', '.join(neg)}" if neg else "  no category harmed"
-        print(f"  {r.arm:8s} w={r.width:<3d} ({r.params:>7,} params)  "
+        print(f"  {r.arm:8s} {str(r.width):<9s} ({r.params:>10,} params)  "
               f"worst={r.worst:.3f}  mCE={r.mCE:.3f}  trains {r.p_trained:.0%}{flag}")
 
     # identity is excluded from every recommendation: it scores exactly 0.000 on
@@ -214,7 +227,7 @@ if __name__ == "__main__":
 
     if not real.empty:
         b = real.iloc[0]
-        print(f"\n  best worst-case (excl. identity): {b['arm']} w={int(b['width'])} "
+        print(f"\n  best worst-case (excl. identity): {b['arm']} {b['width']} "
               f"-> {b['worst']:.3f}, mCE={b['mCE']:.3f}")
     print(f"  arms that beat doing nothing (mCE < 1): "
           f"{', '.join(useful['arm'].unique()) or 'NONE'}")
@@ -228,7 +241,7 @@ if __name__ == "__main__":
         print(head)
         for r in ranked.itertuples():
             vals = "".join(f"{getattr(r, c, float('nan')):>13.3f}" for c in wcats)
-            print(f"  {r.arm:10s}{r.width:>6d}{vals}")
+            print(f"  {r.arm:10s}{str(r.width):>10s}{vals}")
 
     if clean.empty:
         print("\n  NO arm is non-negative on every category. If the arms trained\n"
@@ -236,5 +249,5 @@ if __name__ == "__main__":
               "  and the lam ramp before believing it.")
     else:
         c = clean.iloc[0]
-        print(f"\n  best with no harmed category: {c['arm']} w={int(c['width'])}.\n"
+        print(f"\n  best with no harmed category: {c['arm']} {c['width']}.\n"
               "  K3 has to beat this, or this becomes the finding instead.")

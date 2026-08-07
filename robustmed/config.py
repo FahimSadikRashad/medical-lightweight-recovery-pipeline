@@ -183,7 +183,8 @@ def ae_ckpt(width, seed=None, tag=None, arch=None):
     multi-seed result look like a capacity finding.
     """
     parts = ["recovery_ae" if arch in (None, "convae") else f"recovery_{arch}"]
-    parts.append(f"w{width}")
+    # width=None means "the paper's own configuration", not a missing value
+    parts.append("published" if width is None else f"w{width}")
     if seed is not None:
         parts.append(f"s{seed}")
     if tag:

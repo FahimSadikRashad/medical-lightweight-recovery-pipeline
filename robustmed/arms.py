@@ -23,18 +23,27 @@ in the paper -- it is a real deviation, just an unavoidable one.
 Where a detail could not be verified it is flagged inline rather than presented
 as faithful. Check those against the papers before the camera-ready.
 
-PARAMETER-COUNT CHECK. The cheapest test of whether a reimplementation is
-faithful is whether it lands on the paper's reported size. Two of four do:
+PARAMETER-COUNT CHECK, resolved against the papers and official configs:
 
-    arm     built    reported     verdict
-    DnCNN    558k      ~556k      matches
-    SAFMN    225k      ~240k      matches
-    SPAN     398k      ~150k      2.6x TOO LARGE -- block is wrong
-    NAFNet    29M       ~17M      1.7x TOO LARGE -- block is wrong
+    arm     built    reported                            verdict
+    DnCNN    558k    ~556k (DnCNN-S, 17 layers, 64ch)    matches
+    SAFMN    225k    ~240k (dim 36, 8 blocks)            matches
+    NAFNet    29M    see below                           EXACT
+    SPAN     398k    498k at x4 SR                       explained
 
-SPAN and NAFNet must be reconciled against their papers before any comparison
-using them is written up. The structures are right in outline; the per-block
-cost is not, which means some conv is wider or some layer is spurious.
+NAFNet: the 29M here is the SIDD config (width 32, enc [2,2,4,8], middle 12,
+dec [2,2,2,2]). The widely quoted 17.11M is a DIFFERENT config -- GoPro
+width32, enc [1,1,1,28], middle 1, dec [1,1,1,1]. This implementation returns
+17,111,907 for the GoPro config and 67,888,835 for GoPro width64, both exact
+against the paper, so the block is right and only the reference number was
+wrong. SIDD is the denoising config and therefore the one to use here.
+
+SPAN: reported is 498K, not the 150K quoted earlier. The 100K difference from
+our 398K is the x4 PixelShuffle head we necessarily drop plus SPAN's wider
+feature-concatenation conv. The body matches: 6 blocks x 3 convs x 3x3 x 48ch.
+
+The only genuine implementation error found was in SPAB's attention -- see the
+note there. It is fixed.
 """
 import torch
 import torch.nn as nn
@@ -180,11 +189,17 @@ class SPAB(nn.Module):
     Three 3x3 convs; the attention map is derived from the pre-activation
     features by a symmetric activation, so attention costs zero parameters.
 
-    !! TWO UNVERIFIED DETAILS, both needing the paper before publication:
-      1. The symmetric activation sigma_a is approximated here by sigmoid.
-      2. Three full c->c 3x3 convs per block gives 398k at the published 48ch /
-         6 blocks, against roughly 150k reported. The real SPAB is cheaper than
-         this, so at least one of these convs is narrower or 1x1.
+    Per arXiv:2311.12770 (v3), Section 3:
+      H  = three 3x3 convs, all c-channeled
+      U  = O_{i-1} (+) H          residual added BEFORE attention
+      A  = sigma_a(H),  sigma_a(x) = Sigmoid(x) - 0.5
+      O  = U * A
+
+    sigma_a is symmetric about the origin, which is the property the paper
+    requires: x * sigma_a(x) > 0, so gradients are amplified in information-rich
+    regions and suppressed elsewhere. A plain sigmoid is NOT symmetric about the
+    origin and gives away exactly that property -- which is what this originally
+    used.
     """
 
     def __init__(self, c):
@@ -194,10 +209,11 @@ class SPAB(nn.Module):
         self.c3 = nn.Conv2d(c, c, 3, padding=1)
 
     def forward(self, x):
-        y = F.silu(self.c1(x))
-        y = F.silu(self.c2(y))
-        pre = self.c3(y)
-        return x + pre * torch.sigmoid(pre)
+        h = F.silu(self.c1(x))
+        h = F.silu(self.c2(h))
+        h = self.c3(h)
+        u = x + h                                  # pre-attention feature map
+        return u * (torch.sigmoid(h) - 0.5)        # symmetric about the origin
 
 
 class SPAN(RecoveryModule):

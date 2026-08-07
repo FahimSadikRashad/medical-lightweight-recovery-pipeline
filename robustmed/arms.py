@@ -229,15 +229,27 @@ class SPAN(RecoveryModule):
 
     def __init__(self, width=48, blocks=6, output=None, **kw):
         super().__init__(output=output)
-        self.width = width
+        self.width, self.n_blocks = width, blocks
         self.stem = nn.Conv2d(3, width, 3, padding=1)
-        self.blocks = nn.Sequential(*[SPAB(width) for _ in range(blocks)])
-        self.cat = nn.Conv2d(width, width, 3, padding=1)
+        self.blocks = nn.ModuleList([SPAB(width) for _ in range(blocks)])
+        # SPAN concatenates the stem output with several intermediate SPAB
+        # outputs before the tail. Without it this net cannot train: each block
+        # ends in `U * (sigmoid(H) - 0.5)`, whose gain is bounded by 0.5, so six
+        # stacked blocks attenuate the signal by up to 0.5^6 ~ 0.016 and nothing
+        # survives to the head. Omitting this concat is what produced SPAN's
+        # mCE 1.373 -- a bug in this file, not a property of the architecture.
+        self.cat = nn.Conv2d(width * 4, width, 1)
         self.head = nn.Conv2d(width, 3, 3, padding=1)
 
     def body(self, x):
         z = self.stem(x)
-        z = self.cat(self.blocks(z)) + z
+        outs = [z]
+        h = z
+        for i, blk in enumerate(self.blocks):
+            h = blk(h)
+            if i in (self.n_blocks // 2 - 1, self.n_blocks - 2, self.n_blocks - 1):
+                outs.append(h)
+        z = self.cat(torch.cat(outs[-4:], dim=1)) + z
         return self.head(z)
 
 

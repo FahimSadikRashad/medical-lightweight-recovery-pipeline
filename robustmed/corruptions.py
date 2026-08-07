@@ -30,7 +30,27 @@ def registry():
                 f"{sorted(CORRUPTIONS_DS)}. Set config.CORRUPTION_REGISTRY_FLAG "
                 f"to a modality-matched one.")
         _registry, _registry_flag = CORRUPTIONS_DS[flag], flag
+        _patch_missing_rng(_registry)
     return _registry
+
+
+def _patch_missing_rng(reg):
+    """Give corruption objects the `rng` their own apply() expects.
+
+    medmnistc's ImpulseNoise.apply calls skimage.util.random_noise(rng=self.rng)
+    but never sets self.rng in __init__, so the family raises AttributeError the
+    first time it is used. Nothing in our code can avoid it -- the registry is
+    the benchmark's -- so the attribute is supplied here, seeded from config.SEED
+    to keep the corrupted test set reproducible across runs.
+
+    Only fills in what is missing; families that set their own rng are untouched.
+    """
+    import numpy as np
+    patched = [name for name, obj in reg.items() if not hasattr(obj, "rng")]
+    for name in patched:
+        reg[name].rng = np.random.default_rng(config.SEED)
+    if patched:
+        print(f"note: supplied missing rng for {patched} (medmnistc bug)")
 
 
 def reset():

@@ -19,9 +19,10 @@ Results are split three ways, because pooling them hides the interesting group:
                                  answer to "compare against the full set of
                                  corruptions" from the progress presentation
 
-Conditions where even the clean-trained baseline is already at chance are
-reported separately rather than being allowed to define the worst case -- a
-floor set by a condition nobody can fix says nothing about the module.
+Conditions the baseline cannot handle are NOT excluded: that is where the frozen
+classifier fails and recovery has the most to prove. Only conditions that no
+model clears -- knowable after every arm has run -- are split into their own
+group, so the worst case is not defined by something nobody can fix.
 
     python scripts/12_corruption_sweep.py
     python scripts/12_corruption_sweep.py --widths 4 16 --severities 0 1 2 3 4
@@ -71,11 +72,10 @@ if __name__ == "__main__":
     b1_raw = engine.eval_conditions(None, clf, test, [data.CLEAN] + conds)
     b1 = balanced(b1_raw)
 
-    degenerate = engine.degenerate_conditions(b1, conds)
-    scored = [c for c in conds if c not in degenerate]
-    print(f"\ndegenerate (baseline already at chance): {len(degenerate)}/{len(conds)}")
-    for c in degenerate:
-        print(f"  {c}")
+    at_chance = [c for c in conds if b1.get(c, 1.0) <= config.COLLAPSE_BAL]
+    print(f"\nbaseline at chance on {len(at_chance)}/{len(conds)} conditions.")
+    print("  This is HEADROOM, not a reason to exclude them -- it is where the\n"
+          "  frozen classifier fails and recovery has the most to prove.")
 
     # --- each recovery checkpoint over the same grid ------------------------
     rows = []
@@ -101,7 +101,7 @@ if __name__ == "__main__":
                     "family": name, "severity": sev,
                     "category": config.category_of(name),
                     "group": group_of(name, sev, seen, config.TRAIN_SEVERITIES),
-                    "degenerate": c in degenerate,
+                    "baseline_at_chance": c in at_chance,
                     "bal": bal[c], "baseline_bal": b1[c],
                     "gain": bal[c] - b1[c],
                 })
@@ -114,9 +114,18 @@ if __name__ == "__main__":
     store.save_table("corruption_sweep", df)
 
     # --- what actually binds ------------------------------------------------
-    ok = df[~df["degenerate"]]
+    # Unfixable = no model cleared chance. Only knowable now that every model
+    # has run; reported as its own group rather than pre-excluded.
+    unfixable = set(engine.unfixable_conditions(
+        [balanced(v) for k, v in raw.items() if k != "baseline1"], conds))
+    df["unfixable"] = [data.condition(r.family, r.severity) in unfixable
+                       for r in df.itertuples()]
+    print(f"\nunfixable by every model: {len(unfixable)}/{len(conds)}")
+    for c in sorted(unfixable):
+        print(f"  {c}")
+    ok = df[~df["unfixable"]]
 
-    print("\n=== worst condition per model (excluding degenerate) ===")
+    print("\n=== worst condition per model (excluding unfixable) ===")
     for key, g in ok.groupby("model"):
         w = g.loc[g["bal"].idxmin()]
         print(f"  {key:22s} worst={w['bal']:.4f} on {w['family']}_sev{w['severity']} "

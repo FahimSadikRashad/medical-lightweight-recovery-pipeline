@@ -56,11 +56,10 @@ if __name__ == "__main__":
             if data.parse_condition(c)[1] == config.HOLDOUT_SEVERITY]
 
     val_probe = engine.make_val_probe(val)
-    degenerate = engine.degenerate_conditions(b1, corrupted)
-    if degenerate:
-        print(f"\nnote: baseline already at chance on {len(degenerate)} condition(s): "
-              f"{degenerate}\n  -> excluded from worst-case, reported separately")
-    scored = [c for c in corrupted if c not in degenerate]
+    # Score over EVERY corrupted condition. Do not pre-filter on the baseline:
+    # a condition where the baseline is at chance is where recovery matters
+    # most, not least. Unfixable conditions are identified after the fact.
+    scored = list(corrupted)
 
     print(f"\ngrid: {len(args.seeds)} seeds x {len(args.widths)} widths x "
           f"{len(args.lambdas)} lambdas x {len(args.outputs)} outputs = "
@@ -124,6 +123,12 @@ if __name__ == "__main__":
                           f"collapsed={n_collapsed}/{len(conditions)}", flush=True)
 
     df = pd.DataFrame(rows)
+    unfixable = engine.unfixable_conditions(
+        [balanced(v) for v in raw.values()], corrupted)
+    if unfixable:
+        print(f"\nunfixable ({len(unfixable)}/{len(corrupted)}): no run got above "
+              f"chance here -- reported as its own group, not excluded from the "
+              f"worst case\n  {unfixable}")
     store.save(store.STABILITY, raw)
     store.save_table("stability_runs", df)
     print("\n=== per run ===")

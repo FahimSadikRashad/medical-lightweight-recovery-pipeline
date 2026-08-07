@@ -129,15 +129,29 @@ def corruption_error(bal, baseline_bal, conditions):
     return float(np.mean(ratios)) if ratios else float("nan")
 
 
-def degenerate_conditions(baseline_bal, conditions, floor=None):
-    """Conditions where even the clean-trained baseline is already at chance.
+def unfixable_conditions(bals, conditions, floor=None):
+    """Conditions where the BEST arm is still at chance -- nobody can fix them.
 
-    Worst-case over a condition nobody can fix is not informative -- it would
-    silently define the floor for every arm. Report these as their own group.
+    `bals` is an iterable of {condition: balanced_accuracy}, one per arm.
+
+    The earlier version of this function tested the clean-trained baseline
+    instead, which had it exactly backwards. A condition where the baseline sits
+    at chance is where recovery has the MOST headroom, not the least: on
+    PneumoniaMNIST the baseline is at 0.5000 for gaussian_noise at every
+    severity, and that is precisely the family recovery lifts to ~0.78.
+    Excluding it would have deleted a trained family from the worst-case metric.
+
+    Unfixable can only be decided after the arms have run, so call this at the
+    end and use it to report a separate group -- never to pre-filter.
     """
     floor = config.COLLAPSE_BAL if floor is None else floor
-    return [c for c in conditions
-            if c in baseline_bal and baseline_bal[c] <= floor]
+    bals = list(bals)
+    out = []
+    for c in conditions:
+        seen = [b[c] for b in bals if c in b]
+        if seen and max(seen) <= floor:
+            out.append(c)
+    return out
 
 
 @torch.no_grad()

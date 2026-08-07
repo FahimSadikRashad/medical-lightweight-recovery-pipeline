@@ -193,6 +193,18 @@ if __name__ == "__main__":
     print(agg.to_string(index=False))
 
     print("\n=== read this ===")
+    # If nothing trained, every learned arm collapsed to the same constant
+    # output and the whole table is one number repeated. Say so before printing
+    # a ranking of it -- identical mCE across architectures reads as a finding.
+    live = agg[agg["arm"].isin(models.LEARNED_NAMES)]
+    if len(live) and live["p_trained"].max() == 0:
+        print("  !! NO learned arm trained. Every one collapsed, so the rows below\n"
+              "     are the same constant model under different names and the\n"
+              "     comparison is void.\n"
+              "     Usual cause: --limit / --epochs too small for the lambda ramp.\n"
+              "     The CE term reaches full strength before MSE has taught the\n"
+              "     module anything, and best-epoch selection then falls back to\n"
+              "     the pure-MSE epoch. Rerun on full data at the default epochs.\n")
     # Ranking key: worst-case ONLY while it still discriminates.
     #
     # Over the full registry it usually does not. Every arm bottoms out within a

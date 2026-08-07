@@ -360,14 +360,17 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     history = []
     label = f"{arch} w={width}"
 
-    # lam stays 0 for the first `warmup` epochs, so warmup >= epochs means the
-    # CE term never activates and the run is a pure-MSE reconstruction -- which
-    # trains to a low loss and recovers nothing. Silent when it happens, and it
-    # makes every architecture look identical, so say so loudly.
+    # lam stays 0 for the first `warmup` epochs, so warmup >= epochs would mean
+    # the CE term never activates: a pure-MSE run that converges to a low loss,
+    # recovers nothing, and makes every architecture produce identical numbers.
+    # AE_WARMUP is tuned for the 10-epoch default, so any shorter run -- every
+    # smoke test -- would silently be invalid. Clamp instead of warning: this
+    # cannot change a real run (warmup=2 < epochs=10) and it makes short runs
+    # meaningful rather than degenerate.
     if lambda_max > 0 and warmup >= epochs:
-        print(f"  !! warmup={warmup} >= epochs={epochs}: the CE term NEVER turns "
-              f"on.\n     This is MSE-only -- not a valid recovery run. Use "
-              f"--epochs > {warmup}.", flush=True)
+        warmup = max(0, epochs - 1)
+        print(f"  note: warmup clamped to {warmup} so the CE term activates "
+              f"within {epochs} epochs", flush=True)
 
     for ep in range(epochs):
         lam = 0.0 if ep < warmup else lambda_max * (ep - warmup + 1) / max(1, epochs - warmup)

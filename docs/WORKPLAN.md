@@ -282,6 +282,46 @@ that is a clean mechanistic result and it tells K3 precisely what to include.
 **Gate:** at least one mechanism shows high retention (scaled keeps most of its
 published benefit) AND is non-negative on photometric.
 
+**Stage 2a result (published configs, 3 seeds, full registry).**
+
+| arm | params | mCE | photometric | note |
+|---|---|---|---|---|
+| unsharp | 0 | **0.898** | **+0.057** | harms nothing |
+| **safmn** | 224,895 | **0.933** | −0.047 | best learned arm |
+| identity | 0 | 1.000 | 0.000 | |
+| nafnet | 29,159,715 | 1.106 | −0.067 | **diverges — see below** |
+| convae | 14,067 | 1.143 | −0.106 | 1 seed failed |
+| dncnn | 558,403 | 1.165 | −0.107 | |
+| span | 397,539 | 1.373 | −0.145 | implementation bug, rerun |
+
+**SAFMN at 225k beats NAFNet at 29M** — 130x fewer parameters, better result.
+That is the constrained-environment claim, measured. SAFMN is also the only arm
+whose per-category floor clears chance on all four categories (blur 0.594,
+codec 0.644, noise 0.591, photometric 0.505).
+
+**The pre-registered hypothesis was wrong.** We predicted NAFNet's SCA (global
+average pool -> per-channel scale) would fix photometric, being the only
+mechanism able to express a global intensity remap. It did not: NAFNet is −0.067,
+SAFMN −0.047 with the better floor. So the mechanism that helps is **multi-scale
+spatial pooling**, not global channel attention — SAFM pools to 1/8 resolution
+across four levels, giving near-global context *plus* spatial selectivity.
+Global context alone is insufficient. That is what K3 should build on.
+
+**NAFNet's row is a training result, not an architecture result, and is reported
+as such.** At 29M on 4,708 images the CE term diverges: saturation reaches 1.00,
+gradient norms exceed 1e5, and val_bal collapses to 0.5000 after epoch 2 in two
+of three seeds, so best-epoch selection returns a pure-MSE model. Seed 2 reached
+val_bal 0.8812 at epoch 5 before blowing up, so the architecture can do the task
+and the optimisation cannot hold it. We deliberately did NOT add gradient
+clipping: the claim is "at this data scale under this protocol, the 29M model is
+not trainable", which is itself a finding for a constrained-environment paper.
+State the protocol (Adam, lr 1e-3, no clipping, 10 epochs, lambda ramp to 1.5)
+whenever the row is quoted, and never write it as "NAFNet performs poorly".
+
+The `ce_used` column records this automatically: it is the fraction of seeds
+whose selected epoch had lambda > 0. Anything below 1.0 means some seeds report a
+model the classifier never shaped.
+
 ### Stage 3 — the novel module (~4h GPU)
 
 **Multi-branch gated recovery.** A low-pass branch, a high-pass branch, and — if

@@ -109,6 +109,10 @@ if __name__ == "__main__":
             "mean_gain": float(np.mean([bal[c] - b1[c] for c in conds])),
             "clean_delta": bal[data.CLEAN] - b1[data.CLEAN],
             "trained": n_collapsed < len(all_conds),
+            # False => the kept epoch was inside the lambda warmup, so this row
+            # is a pure-MSE reconstruction that the classifier never shaped.
+            "ce_active": getattr(module, "_ce_active", True),
+            "selected_epoch": getattr(module, "_selected_epoch", None),
         }
         row.update(category_gains(bal, b1, conds))
         # Per-category floor. The global floor saturates at chance for every
@@ -179,6 +183,7 @@ if __name__ == "__main__":
     agg = df.groupby(["arm", "width"]).agg(
         n=("key", "size"), params=("params", "first"),
         p_trained=("trained", "mean"),
+        ce_used=("ce_active", "mean"),
         worst=("worst_abs", "mean"), worst_sd=("worst_abs", "std"),
         mCE=("mCE", "mean"), mean_gain=("mean_gain", "mean"),
         clean_delta=("clean_delta", "mean"),
@@ -225,6 +230,10 @@ if __name__ == "__main__":
         neg = [c.replace("gain_", "") for c in gain_cols
                if getattr(r, c, 0) is not None and getattr(r, c, 0) < 0]
         flag = f"  HARMS: {', '.join(neg)}" if neg else "  no category harmed"
+        ce = getattr(r, "ce_used", 1.0)
+        if ce < 1.0:
+            flag = (f"  CE LIVE IN ONLY {ce:.0%} OF SEEDS -- the rest kept a "
+                    f"pure-MSE epoch") + flag
         print(f"  {r.arm:8s} {str(r.width):<9s} ({r.params:>10,} params)  "
               f"worst={r.worst:.3f}  mCE={r.mCE:.3f}  trains {r.p_trained:.0%}{flag}")
 

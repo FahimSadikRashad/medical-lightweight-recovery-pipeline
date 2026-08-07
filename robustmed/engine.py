@@ -427,7 +427,26 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                 "history": history}, path)
     print(f"saved -> {path}")
     ae.eval()
+    _attach_history(ae, history, best["epoch"] if select else epochs)
     return ae
+
+
+def _attach_history(module, history, selected_epoch):
+    """Record which epoch was kept, and whether the CE term was live in it.
+
+    A run whose best epoch falls inside the lambda warmup produced a pure-MSE
+    model: it reconstructs pixels and was never shaped by the classifier, which
+    is a different outcome from "trained and underperformed". NAFNet at its
+    published 29M does exactly this on 2 of 3 seeds -- val_bal peaks at epoch 2,
+    then the CE term diverges (saturation to 1.00, gradient norms above 1e5) and
+    selection falls back. Reporting that as an architecture result without
+    marking it would be wrong, so it is carried as data rather than eyeballed
+    from the training log.
+    """
+    module._history = history
+    module._selected_epoch = selected_epoch
+    row = next((h for h in history if h["epoch"] == selected_epoch), None)
+    module._ce_active = bool(row and row.get("lam", 0) > 0)
 
 
 def load_recovery(width, seed=None, tag=None, arch=None):
@@ -438,6 +457,8 @@ def load_recovery(width, seed=None, tag=None, arch=None):
                         output=ck.get("output")).to(DEVICE)
     ae.load_state_dict(ck["model"])
     ae.eval()
+    _attach_history(ae, ck.get("history", []),
+                    ck.get("selected_epoch", len(ck.get("history", []))))
     return ae
 
 

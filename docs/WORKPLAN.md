@@ -22,10 +22,12 @@ Parameter count is a reported cost, not the claim.
 
 ### Contributions
 
-**K1 — Benchmark.** First systematic comparison of efficient restoration
-architectures used as front-ends to frozen medical classifiers, evaluated on
-worst-case rather than mean performance, across modalities. This is the spine of
-the paper. The ConvAE is one arm in it, labelled as the naive baseline.
+**K1 — Mechanism study.** Which design concepts from efficient restoration
+architectures actually buy corruption robustness in front of a frozen medical
+classifier, and which survive compression to a constrained budget. Not a
+leaderboard: the published architectures are studied as sources of mechanisms,
+not as competitors to beat, because a 29M U-Net answers a different question
+than ours. Evaluated on worst-case and per-category rather than mean.
 
 **K2 — Finding: recovery generalizes across SEVERITY but not across corruption
 CATEGORY, and on one category it actively does harm.**
@@ -76,8 +78,10 @@ With the output fixed and all 24 runs training, capacity helps monotonically:
 The "smallest wins" claim is dead. What replaces it is a real Pareto question,
 which is what Stage 2 measures.
 
-**K3 — Method.** A gated module that routes between operations rather than adding
-capacity, with two requirements Stage 1 turned from optional into mandatory:
+**K3 — Method.** A module built from the mechanisms Stage 2 shows to be
+scale-robust, assembled at the constrained budget the RQ is about. It routes
+between operations rather than adding capacity, with two requirements Stage 1
+turned from optional into mandatory:
 a **photometric branch** (per-channel affine/gamma, ~6 params) for the category
 spatial filtering cannot touch, and a learned **identity fallback** — because the
 measured failure is not "fails to help" but "actively harms," so knowing when to
@@ -221,58 +225,62 @@ deployment, and it makes unseen-family generalization the headline), or train on
 the full set (in-distribution, easier, weaker claim)? Recommend narrow-train /
 broad-eval as primary, with one broad-train arm to bound the gap.
 
-### Stage 2 — module comparison, primary corpus (~8h GPU)
+### Stage 2 — mechanism study (~2h published + ~4h ablation)
 
-**The main experiment.** Sweep each arm across 3 widths — Pareto frontier over
-**cost as a fraction of end-to-end inference**, not matched parameters.
+**Not a leaderboard.** Our module is not trying to beat NAFNet; a 29M U-Net in
+front of a 2.2M classifier answers a different question than ours. These
+architectures are a *source of design concepts*. Stage 2 asks which concepts
+actually buy corruption robustness in front of a frozen medical classifier, and
+which of those survive compression into the constrained budget the RQ is about.
+Stage 3 then implements the survivors.
 
-| arm | year | design motif being ported | role |
-|---|---|---|---|
-| Identity | — | — | floor |
-| Box filter (exists) | — | fixed low-pass | non-learned low-pass control |
-| Fixed unsharp / FFT high-pass | — | fixed high-pass | non-learned high-pass control — the honest control for K2 |
-| ConvAE (exists) | — | plain conv encoder-decoder | naive learned baseline |
-| DnCNN | 2017 | residual noise prediction | legacy control. Noise is already saturated, so this is deliberately not a contender. |
-| NAFNet | 2022 | gated conv, no activation | recognized restoration reference point |
-| **SPAN** | 2024 | parameter-free attention | **the field's efficiency reference** — NTIRE 2025 *and* 2026 both require entrants to beat SPAN on runtime, params and FLOPs. Including it makes our efficiency claim commensurable with that literature. |
-| **SPANV2** | 2026 | near-pixel branch + depthwise-separable fusion | current NTIRE ESR winner (XiaomiMM). The strongest available "recent" arm. |
-| SAFMN *(optional)* | 2023 | spatially-adaptive feature modulation | lightweight-by-design; closest published motif to our gated module |
+That makes the published-vs-scaled gap the measurement, not a nuisance:
 
-**Selection rationale, revised after Stage 1.** The earlier version picked
-high-frequency reconstructors because blur was thought to bind. Blur turned out
-to be the *best*-recovered category (+0.172). What actually binds is photometric
-corruption, where recovery scores −0.056 — worse than doing nothing. So the axis
-that matters is not high-frequency reconstruction but **conditional behaviour**:
-can the architecture modulate what it does per input, including doing nothing?
-That raises SAFMN (spatially-adaptive feature modulation) from optional to a
-contender, and makes the gate the centrepiece rather than an add-on. DnCNN stays
-a control.
+| | question it answers |
+|---|---|
+| published config | does this concept work here **at all**? (upper bound) |
+| scaled to ~4-20k | does the concept **survive compression**? |
+| the gap between them | is it scale-robust enough to build on? |
 
-**Where the tiny models actually live.** The NTIRE 2026 *denoising* challenge
-reports MambaIR and Restormer as the backbones of choice — both far outside our
-regime. The efficient-SR track is where sub-100k architectures are designed on
-purpose, which is why the contender list is drawn from there rather than from the
-denoising literature. Its 2026 trends — frequency-domain processing, distillation,
-custom CUDA kernels — are also directly relevant, and the frequency-domain trend
-in particular raises the bar for K3 (§Stage 3): our dual-branch design must be
-differentiated from it, not presented as unrelated.
+A concept that only works at 29M is useless to us however good it is. A concept
+that keeps most of its benefit at a few thousand parameters is exactly what K3
+should adopt. Neither number alone tells us that — the ratio does.
 
-**Scale-gap caveat — state this in the paper.** Every learned arm above was
-published at ≥100k parameters. Shrunk to our regime we are not evaluating SPAN or
-NAFNet; we are evaluating their *design motifs* at a scale nobody published at.
-Claim it as "we port efficient-restoration design motifs to the compute-bounded
-regime," never as "we compare against NAFNet." Report both the published
-parameter count and ours for every arm.
+**Stage 2a — reference rows.** Each architecture at its published config, 3
+seeds. Establishes the per-concept ceiling. 5 arms x 3 seeds = 15 models.
 
-Two arms deliberately excluded: MambaIR/SSM (needs fragile CUDA kernels; the
-latency comparison would be unfair and `PARALLEL_PLAN.md` already flags this) and
-Restormer (2022, and used at full scale in NTIRE 2026 — out of regime).
+| arm | concept it contributes |
+|---|---|
+| ConvAE | plain encoder-decoder, multi-scale by stride |
+| DnCNN | one fixed learned filter bank, applied identically to every input |
+| NAFNet | multi-scale U-Net; SimpleGate; **simplified channel attention** |
+| SPAN | parameter-free attention, symmetric about the origin |
+| SAFMN | spatially-adaptive feature modulation across pooling scales |
+| unsharp / box | non-learned fixed operators (controls) |
 
-8 arms × 3 widths × 6 seeds ≈ 144 runs.
+**Stage 2b — mechanism ablation at matched budget.** One skeleton, one parameter
+budget, concepts switched on individually. This is the part that actually feeds
+K3, because it isolates mechanisms rather than confounding them with depth,
+width and training recipe.
 
-**Gate:** at least one learned module beats both non-learned controls on
-worst-case *and* does not go negative on photometric. The second half is new:
-every arm must be checked for actively-harmful categories, not just weak ones.
+| variant | mechanism under test | source |
+|---|---|---|
+| S0 | plain conv stack, single scale | — |
+| S1 | + multi-scale down/up | ConvAE, NAFNet |
+| S2 | + parameter-free attention `sigmoid(H) - 0.5` | SPAN |
+| S3 | + simplified channel attention (global avg pool) | NAFNet |
+| S4 | + spatially-adaptive modulation over pooling scales | SAFMN |
+| S5 | + SimpleGate (channel-split multiply) | NAFNet |
+
+**The hypothesis worth stating before running it.** Photometric corruption is
+the binding category (Stage 1: -0.056, the only negative). It is a *global
+intensity remap*, and exactly one mechanism in that list can represent one:
+NAFNet's SCA, which is a global average pool feeding a per-channel scale. Every
+other mechanism is spatially local. If S3 is the variant that fixes photometric,
+that is a clean mechanistic result and it tells K3 precisely what to include.
+
+**Gate:** at least one mechanism shows high retention (scaled keeps most of its
+published benefit) AND is non-negative on photometric.
 
 ### Stage 3 — the novel module (~4h GPU)
 

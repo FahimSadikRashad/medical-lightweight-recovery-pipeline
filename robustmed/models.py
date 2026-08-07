@@ -185,15 +185,31 @@ LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn")
 ARM_NAMES = tuple(NON_LEARNED) + LEARNED_NAMES
 
 
-def build_recovery(arch="convae", width=16, **kw):
-    """One constructor for every arm, so sweep scripts don't branch on names."""
+def build_recovery(arch="convae", width=16, device="auto", **kw):
+    """One constructor for every arm, so sweep scripts don't branch on names.
+
+    Placing the module on the device happens HERE rather than at the call site.
+    The non-learned arms hold their filters in registered buffers and have no
+    parameters, so nothing else ever moves them -- the learned arms are moved
+    inside train_recovery/load_recovery, which is why a forgotten .to(DEVICE)
+    fails only for box and unsharp, and only once a CUDA batch reaches them.
+
+    device="auto" uses CUDA when available; pass None to leave placement alone.
+    """
     if arch in NON_LEARNED:
         cls = NON_LEARNED[arch]
-        return None if cls is None else cls()
-    learned = _learned()
-    if arch not in learned:
-        raise KeyError(f"unknown arch {arch!r}; have {sorted(ARM_NAMES)}")
-    return learned[arch](width=width, **kw)
+        module = None if cls is None else cls()
+    else:
+        learned = _learned()
+        if arch not in learned:
+            raise KeyError(f"unknown arch {arch!r}; have {sorted(ARM_NAMES)}")
+        module = learned[arch](width=width, **kw)
+
+    if module is not None and device is not None:
+        if device == "auto":
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        module = module.to(device)
+    return module
 
 
 def count_params(m):

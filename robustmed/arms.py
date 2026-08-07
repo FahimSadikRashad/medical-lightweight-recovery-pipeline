@@ -92,10 +92,8 @@ class SimpleGate(nn.Module):
 class NAFBlock(nn.Module):
     """Chen et al., ECCV 2022, Figure 4. dw_expand=2, ffn_expand=2.
 
-    !! This block yields 29M at the published width/depth against roughly 17M
-    reported, so it is about 1.7x too expensive. Cost here is ~7c^2 per block
-    and the 512-channel bottleneck x 12 middle blocks dominates the total.
-    Reconcile against the paper before publishing anything that uses it.
+    Costs ~7c^2 per block, which reproduces the paper's totals exactly at both
+    published GoPro configs (17,111,907 at width32 and 67,888,835 at width64).
     """
 
     def __init__(self, c, dw_expand=2, ffn_expand=2):

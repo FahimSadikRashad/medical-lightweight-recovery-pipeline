@@ -104,6 +104,57 @@ TRAIN_CORRUPTIONS = ["gaussian_noise", "gaussian_blur", "jpeg_compression"]
 TRAIN_SEVERITIES = [0, 1, 2]
 HOLDOUT_SEVERITY = 4          # never seen while training recovery
 
+# --- corruption taxonomy ---------------------------------------------------
+# MedMNIST-C registries are modality-specific and share almost nothing by NAME:
+# across the 12 registries only contrast_down, jpeg_compression and pixelate are
+# universal. gaussian_blur is absent from 6 of them, gaussian_noise from 5. So
+# any cross-dataset statement has to be made at the level of CATEGORY, not
+# corruption name -- "blur" transfers, "gaussian_blur" does not.
+#
+# The categories also name the operation a recovery module would need:
+#   noise        low-pass
+#   blur         high-pass
+#   photometric  intensity remap -- NEITHER spatial filter helps
+#   codec        block/quantization artifacts
+# That third row is the reason this taxonomy is in the code and not just a
+# comment: 6 of the 10 families we never train on are photometric, and a module
+# built from spatial convolutions has no mechanism for them at all.
+CORRUPTION_CATEGORIES = {
+    "noise": ["gaussian_noise", "shot_noise", "impulse_noise", "speckle_noise"],
+    "blur": ["gaussian_blur", "defocus_blur", "motion_blur", "zoom_blur"],
+    "photometric": ["brightness_up", "brightness_down", "contrast_up",
+                    "contrast_down", "gamma_corr_up", "gamma_corr_down",
+                    "saturate"],
+    "codec": ["jpeg_compression", "pixelate"],
+    "artifact": ["bubble", "stain_deposit", "black_corner", "characters"],
+}
+
+
+def category_of(name):
+    for cat, members in CORRUPTION_CATEGORIES.items():
+        if name in members:
+            return cat
+    return "other"
+
+
+def train_corruptions_for(available):
+    """Pick one family per category from whatever this registry actually has.
+
+    Keeps the training protocol comparable across modalities: the same
+    categories every time, even though the family names differ. Falls back to
+    TRAIN_CORRUPTIONS when they are all present (i.e. chest X-ray), so existing
+    results are unaffected.
+    """
+    available = set(available)
+    if set(TRAIN_CORRUPTIONS) <= available:
+        return list(TRAIN_CORRUPTIONS)
+    picked = []
+    for cat in ("noise", "blur", "codec"):
+        hit = [c for c in CORRUPTION_CATEGORIES[cat] if c in available]
+        if hit:
+            picked.append(hit[0])
+    return picked
+
 # --- evaluation ------------------------------------------------------------
 EVAL_CORRUPTIONS = ["gaussian_noise", "gaussian_blur", "jpeg_compression"]
 EVAL_SEVERITIES = [0, 2, 4]   # mild / mid / strong; 4 is the unseen holdout

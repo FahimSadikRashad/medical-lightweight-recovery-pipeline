@@ -78,7 +78,6 @@ if __name__ == "__main__":
         print(f"  {c}")
 
     # --- each recovery checkpoint over the same grid ------------------------
-    rows = [],
     rows = []
     raw = {"baseline1": b1_raw}
     for width in args.widths:
@@ -100,6 +99,7 @@ if __name__ == "__main__":
                 rows.append({
                     "model": key, "arch": args.arch, "width": width, "seed": seed,
                     "family": name, "severity": sev,
+                    "category": config.category_of(name),
                     "group": group_of(name, sev, seen, config.TRAIN_SEVERITIES),
                     "degenerate": c in degenerate,
                     "bal": bal[c], "baseline_bal": b1[c],
@@ -121,6 +121,17 @@ if __name__ == "__main__":
         w = g.loc[g["bal"].idxmin()]
         print(f"  {key:22s} worst={w['bal']:.4f} on {w['family']}_sev{w['severity']} "
               f"(gain {w['gain']:+.3f}, group={w['group']})")
+
+    print("\n=== by category (the operation a module would need) ===")
+    cat = ok.groupby("category").agg(
+        n=("bal", "size"), families=("family", "nunique"),
+        worst=("bal", "min"), mean_bal=("bal", "mean"),
+        mean_gain=("gain", "mean")).reset_index().sort_values("mean_bal")
+    store.save_table("corruption_by_category", cat)
+    print(cat.to_string(index=False))
+    print("  photometric = global intensity remap. Spatial convolution has no\n"
+          "  mechanism for it, and we never train on it -- if it is the worst\n"
+          "  category, K2 is a THREE-way conflict, not noise-vs-blur.")
 
     print("\n=== by group ===")
     grp = ok.groupby("group").agg(n=("bal", "size"), worst=("bal", "min"),

@@ -33,11 +33,19 @@ restoration network has capacity to learn both conditionally. A tiny module does
 not, so it compromises — and the compromise is measurable in the data we already
 have.
 
-> ⚠️ **Provisional until Stage 1.** Everything below is derived from **3 of the
-> registry's corruption families**. "Blur binds" may not survive contact with the
-> full set — another family may bind harder, which would change which
-> architectures are contenders in Stage 2. Stage 1 settles this before any
-> training is spent on it.
+> ⚠️ **Provisional until Stage 1, and B1 says it is probably too narrow.**
+> Everything below is derived from **3 of the pneumoniamnist registry's 13
+> families**. Of the 10 we never train on, **6 are photometric** — brightness ±,
+> contrast ±, gamma ±. Photometric corruption is a global intensity remap, and a
+> module built from spatial convolutions has no mechanism for it: neither
+> low-pass nor high-pass filtering corrects a gamma shift.
+>
+> **Revised hypothesis to test in Stage 1:** the conflict is *three*-way, not
+> two-way — denoise (low-pass), deblur (high-pass), photometric (intensity
+> remap) — and the worst conditions will be photometric rather than blur.
+> If that holds, K2 gets stronger and K3 gains a third branch (a per-channel
+> affine/gamma correction, ~6 parameters). Stage 1 prints the category table
+> that settles it.
 
 | condition | severity slope (sev4 − sev0) | status |
 |---|---|---|
@@ -80,17 +88,27 @@ resolves it. Say so in related work rather than letting a reviewer say it.
 Neither costs more than an hour, and both can invalidate large parts of §4.
 Nothing else starts until they are answered.
 
-- [ ] **B1 — Does the corruption registry for each target modality contain blur
-      families?** MedMNIST-C registries are per-dataset and modality-specific. Our
-      binding constraint is blur. If the dermoscopy/histology/ultrasound
-      registries carry only stain, brightness and optical artifacts, then the
-      cross-modality story cannot be told with this benchmark and we need a
-      different fault model. Could not be checked here — `medmnistc` needs
-      ImageMagick. Run on Colab:
-      ```python
-      from medmnistc.corruptions.registry import CORRUPTIONS_DS
-      {k: sorted(v) for k, v in CORRUPTIONS_DS.items()}
-      ```
+- [x] **B1 — ANSWERED. Passes, with a condition.** Every one of the 12 registries
+      contains at least one blur family, so the cross-modality blur story is
+      tellable. But almost nothing transfers *by name*:
+
+      | | |
+      |---|---|
+      | universal families | only `contrast_down`, `jpeg_compression`, `pixelate` |
+      | `gaussian_blur` | **missing from 6/10** registries |
+      | `gaussian_noise` | **missing from 5/10** registries |
+      | no noise family at all | `pathmnist`, `bloodmnist` |
+
+      **Consequence 1:** every cross-dataset statement must be made at the level
+      of *category* (blur / noise / photometric / codec), never corruption name.
+      "Blur transfers" is sayable; "gaussian_blur transfers" is not. Implemented
+      as `config.CORRUPTION_CATEGORIES` + `config.train_corruptions_for()`, which
+      picks one family per category from whatever a registry actually has.
+
+      **Consequence 2:** histology (PCam → `pathmnist`) has **no noise family**,
+      so the noise-vs-blur conflict cannot be tested there at all. PCam is
+      demoted; ultrasound (`breastmnist`: speckle_noise + motion_blur) and chest
+      X-ray both work.
 - [ ] **B2 — Resolution vs severity calibration.** MedMNIST-C severities are
       calibrated at MedMNIST resolution. Blur severity is *strongly*
       resolution-dependent — a σ that destroys a 64×64 image barely touches
@@ -227,9 +245,13 @@ paper changes shape — far better to learn it here than at Stage 4.
 
 ### Stage 3 — the novel module (~4h GPU)
 
-**Dual-branch gated recovery.** A low-pass branch, a high-pass branch, and a
-~100-parameter per-image gate predicting the blend. Motivated directly by K2: one
-static filter cannot serve both objectives, so predict which one this image needs.
+**Multi-branch gated recovery.** A low-pass branch, a high-pass branch, and — if
+Stage 1's category table confirms the three-way hypothesis — a photometric branch
+(per-channel affine/gamma, ~6 params), combined by a ~100-parameter per-image
+gate. Motivated directly by K2: one static filter cannot serve objectives that
+call for opposite operations, so predict which one this image needs.
+
+Branch count is decided by Stage 1, not assumed here.
 
 Ablations that make it a contribution rather than a trick:
 
@@ -250,7 +272,7 @@ a data-use agreement. Resolution handling per B2.
 |---|---|---|---|---|
 | **Montgomery + Shenzhen TB** | chest X-ray | direct NLM zips, no auth | 800 | primary non-MNIST. Same modality as our registry, so B1 is satisfied by construction. Real adult clinical data. |
 | **BUSI** | breast ultrasound | open (Al-Dhabyani) | 780 | second modality, cheap |
-| **PCam** | histology | HuggingFace `basveeling/pcam` | 327k | scale + third modality, gated on B1 |
+| ~~PCam~~ | histology | HuggingFace | 327k | **dropped by B1** — `pathmnist` has no noise family, so the noise-vs-blur conflict cannot be tested there |
 | **NIH ChestX-ray14** | chest X-ray | official NIH Box | 112k | scale, if PCam is blocked by B1. Pull ~3 of 12 tars (~6 GB) |
 
 Recommended: **Montgomery+Shenzhen first**. Two downloads, no auth, full pipeline
@@ -293,7 +315,7 @@ before any new training starts.
 
 | risk | mitigation |
 |---|---|
-| **B1 fails** — target registries have no blur | Fall back to CXR-only corpora (Montgomery+Shenzhen, NIH), where the registry is native. Cross-modality becomes a limitation, not a broken claim. |
+| ~~B1 fails~~ — **resolved**: all registries have blur | Residual risk is naming, not absence: compare by category, never by family name. `config.train_corruptions_for()` enforces this. |
 | **B2 unresolved** — severity not comparable across resolution | Fix one common resolution for all corpora. Decide before Stage 4, not after. |
 | Module gaps sit inside seed noise | 6 seeds from the start, CIs on worst-case. Already the top statistical problem in `EXPERIMENTS.md`. |
 | Gated module reads as DASR-derivative | Position on the finding (K2) and the regime, not the mechanism. |
@@ -304,7 +326,7 @@ before any new training starts.
 ## 6. Decisions needed
 
 1. **B2 — one common resolution, or per-corpus recalibration?** I recommend
-   common resolution.
+   common resolution. (B1 is now answered — see §1.)
 2. **Narrow-train / broad-eval, or train on the full corruption set?** I
    recommend narrow-train + broad-eval as primary (it makes unseen-family
    generalization the headline and matches deployment), with one broad-train arm

@@ -149,14 +149,22 @@ if __name__ == "__main__":
     print(grp.to_string(index=False))
 
     print("\n=== per family: severity slope (does recovery hold as it gets worse?) ===")
-    lo, hi = min(args.severities), max(args.severities)
+    # Slope over the widest severity range each family still HAS. Anchoring on
+    # the global min/max returns NaN for any family whose hardest severity was
+    # dropped as unfixable -- which silently hid brightness_down, contrast_down
+    # and speckle_noise, three of the families the result is about.
     fam = []
     for (name,), g in ok.groupby(["family"]):
+        sevs = sorted(g["severity"].unique())
+        if len(sevs) < 2:
+            continue
+        lo, hi = sevs[0], sevs[-1]
         a = g[g["severity"] == lo]["bal"].mean()
         b = g[g["severity"] == hi]["bal"].mean()
         fam.append({"family": name, "seen": name in seen,
-                    f"bal_sev{lo}": a, f"bal_sev{hi}": b, "slope": b - a,
-                    "mean_gain": g["gain"].mean()})
+                    "category": config.category_of(name),
+                    "sev_lo": lo, "sev_hi": hi, "bal_lo": a, "bal_hi": b,
+                    "slope": b - a, "mean_gain": g["gain"].mean()})
     fam = pd.DataFrame(fam).sort_values("slope")
     store.save_table("corruption_family_slopes", fam)
     print(fam.to_string(index=False))

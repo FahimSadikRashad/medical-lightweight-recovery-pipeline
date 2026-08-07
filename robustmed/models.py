@@ -171,10 +171,18 @@ class UnsharpFilter(nn.Module):
 
 
 # --- arm registry ----------------------------------------------------------
-# Stage 2 adds DnCNN / NAFNet / SPAN / SPANV2 here. Each must subclass
-# RecoveryModule so it inherits the shared output parameterization.
-LEARNED = {"convae": ConvAE}
 NON_LEARNED = {"identity": None, "box": BoxDenoiser, "unsharp": UnsharpFilter}
+
+
+def _learned():
+    """Imported lazily so robustmed.arms can import RecoveryModule from here."""
+    from . import arms
+    return {"convae": ConvAE, "dncnn": arms.DnCNN, "nafnet": arms.NAFNet,
+            "span": arms.SPAN, "safmn": arms.SAFMNet}
+
+
+LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn")
+ARM_NAMES = tuple(NON_LEARNED) + LEARNED_NAMES
 
 
 def build_recovery(arch="convae", width=16, **kw):
@@ -182,10 +190,10 @@ def build_recovery(arch="convae", width=16, **kw):
     if arch in NON_LEARNED:
         cls = NON_LEARNED[arch]
         return None if cls is None else cls()
-    if arch not in LEARNED:
-        raise KeyError(f"unknown arch {arch!r}; have "
-                       f"{sorted(LEARNED) + sorted(NON_LEARNED)}")
-    return LEARNED[arch](width=width, **kw)
+    learned = _learned()
+    if arch not in learned:
+        raise KeyError(f"unknown arch {arch!r}; have {sorted(ARM_NAMES)}")
+    return learned[arch](width=width, **kw)
 
 
 def count_params(m):

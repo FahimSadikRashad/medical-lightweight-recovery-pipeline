@@ -222,6 +222,56 @@ def probe_balanced(ae, clf, x_uint8, y, batch_size=256):
     return float(balanced_accuracy_score(y.numpy(), np.array(preds)))
 
 
+def make_condition_cache(raw, conditions, limit=None):
+    """Render every evaluation condition ONCE as uint8 and reuse it.
+
+    Corruptions go through ImageMagick on the CPU, one image at a time, inside
+    the DataLoader. That is the dominant cost of the whole project: the Stage 1
+    sweep spent hours rendering while the GPU idled. A condition is deterministic
+    given (image, corruption, severity), so re-rendering it for every model is
+    pure waste -- Stage 2 evaluates ~144 models over the same grid.
+
+    Memory: 64x64x3 uint8 is 12 KB, so the full 13-family x 5-severity grid over
+    a 624-image test split is ~500 MB. Held on CPU; batches move to the device.
+    """
+    from . import data
+
+    cache, n = {}, limit or len(raw)
+    for i, cond in enumerate(conditions):
+        loader = data.condition_loader(data.subset(raw, limit), cond)
+        xs, ys = [], []
+        for x01, y in loader:
+            xs.append((x01 * 255).round().to(torch.uint8))
+            ys.append(y)
+        cache[cond] = (torch.cat(xs), torch.cat(ys))
+        print(f"\r  cached {i+1}/{len(conditions)} conditions", end="", flush=True)
+    total = sum(v[0].numel() for v in cache.values()) / 1e6
+    print(f"\r  cached {len(conditions)} conditions, {n} images each "
+          f"({total:.0f} MB)      ")
+    return cache
+
+
+@torch.no_grad()
+def eval_cached(recovery, classifier, cache, batch_size=256):
+    """eval_conditions() against a pre-rendered cache. Same return shape."""
+    pipe = Pipeline(recovery, classifier).eval()
+    out = {}
+    for cond, (x_uint8, y) in cache.items():
+        preds = []
+        for i in range(0, len(y), batch_size):
+            xb = x_uint8[i:i + batch_size].to(DEVICE).float() / 255.0
+            preds += pipe(xb).argmax(1).cpu().tolist()
+        ys, ps = y.numpy(), np.array(preds)
+        out[cond] = {
+            "accuracy": float((ys == ps).mean()),
+            "balanced_accuracy": float(balanced_accuracy_score(ys, ps)),
+            "n": int(ys.size),
+            "pred_counts": {int(k): int(v) for k, v in Counter(ps.tolist()).items()},
+            "confusion": confusion_matrix(ys, ps).tolist(),
+        }
+    return out
+
+
 @torch.no_grad()
 def latency_ms(model, batch_size=1, iters=200, warmup=20):
     """Per-image latency using CUDA events with explicit syncs.

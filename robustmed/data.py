@@ -87,9 +87,23 @@ def load_dataset(flag=None):
     return load_medmnist(flag)
 
 
-# Stage 4 populates this: {"montgomery_shenzhen": fn, "busi": fn, ...}.
-# Each fn returns (train, val, test, info) matching load_medmnist's contract.
-EXTERNAL_LOADERS = {}
+def _external():
+    """Imported lazily so robustmed.external can import config without a cycle."""
+    from . import external
+    return external.LOADERS
+
+
+class _LazyLoaders(dict):
+    def __contains__(self, k):
+        return k in _external()
+
+    def __getitem__(self, k):
+        return _external()[k]
+
+
+# Non-MedMNIST corpora, keyed by --dataset. Each returns (train, val, test,
+# info) matching load_medmnist's contract, so nothing downstream changes.
+EXTERNAL_LOADERS = _LazyLoaders()
 
 
 def load_medmnist(flag=None):

@@ -98,6 +98,14 @@ if __name__ == "__main__":
             "trained": n_collapsed < len(all_conds),
         }
         row.update(category_gains(bal, b1, conds))
+        # Per-category floor. The global floor saturates at chance for every
+        # arm; within a category it still separates them, and it is what
+        # "robust under any condition" actually means per corruption type.
+        by_cat = {}
+        for c in conds:
+            by_cat.setdefault(config.category_of(data.parse_condition(c)[0]), []).append(c)
+        for cat, cc in by_cat.items():
+            row[f"worst_{cat}"] = engine.worst_case(bal, cc)[1]
         rows.append(row)
         cats = "  ".join(f"{k.replace('gain_',''):<11s}{v:+.3f}"
                          for k, v in row.items() if k.startswith("gain_"))
@@ -162,6 +170,9 @@ if __name__ == "__main__":
         mCE=("mCE", "mean"), mean_gain=("mean_gain", "mean"),
         clean_delta=("clean_delta", "mean"),
         **{c: (c, "mean") for c in gain_cols},
+        **{c: (c, "mean") for c in df.columns if c.startswith("worst_")
+           and c not in ("worst_abs", "worst_condition", "worst_abs_all",
+                         "worst_condition_all", "worst_gain")},
     ).reset_index()
     store.save_table("module_comparison_summary", agg)
 
@@ -169,9 +180,22 @@ if __name__ == "__main__":
     print(agg.to_string(index=False))
 
     print("\n=== read this ===")
-    # Rank on worst-case, tie-break on mCE. Without the tie-break, arms that all
-    # bottom out at chance sort arbitrarily and a harmful arm can be crowned.
-    ranked = agg.sort_values(["worst", "mCE"], ascending=[False, True])
+    # Ranking key: worst-case ONLY while it still discriminates.
+    #
+    # Over the full registry it usually does not. Every arm bottoms out within a
+    # fraction of a point of chance -- the w=4..32 sweep spanned 0.4977 to
+    # 0.5000 across all 18 rows -- so sorting on it ranks noise, and it put the
+    # best arm in the table (convae w=32, mCE 0.795) sixteenth, below arms at
+    # mCE 1.37. mCE is the metric carrying the signal there, so switch keys
+    # rather than quietly reporting a meaningless order.
+    spread = agg["worst"].max() - agg["worst"].min()
+    saturated = spread < 0.01
+    if saturated:
+        print(f"  [worst-case spans only {spread:.4f} across arms -- it has\n"
+              f"   saturated at chance and cannot rank. Ranking by mCE.]\n")
+        ranked = agg.sort_values("mCE")
+    else:
+        ranked = agg.sort_values(["worst", "mCE"], ascending=[False, True])
     for r in ranked.itertuples():
         neg = [c.replace("gain_", "") for c in gain_cols
                if getattr(r, c, 0) is not None and getattr(r, c, 0) < 0]
@@ -194,6 +218,17 @@ if __name__ == "__main__":
               f"-> {b['worst']:.3f}, mCE={b['mCE']:.3f}")
     print(f"  arms that beat doing nothing (mCE < 1): "
           f"{', '.join(useful['arm'].unique()) or 'NONE'}")
+
+    wcats = sorted(c for c in agg.columns if c.startswith("worst_")
+                   and c not in ("worst_sd",))
+    if wcats:
+        print("\n  per-category floor (global floor saturates; this one does not):")
+        head = "  " + f"{'arm':10s}{'width':>6s}" + "".join(
+            f"{c.replace('worst_',''):>13s}" for c in wcats)
+        print(head)
+        for r in ranked.itertuples():
+            vals = "".join(f"{getattr(r, c, float('nan')):>13.3f}" for c in wcats)
+            print(f"  {r.arm:10s}{r.width:>6d}{vals}")
 
     if clean.empty:
         print("\n  NO arm is non-negative on every category. If the arms trained\n"

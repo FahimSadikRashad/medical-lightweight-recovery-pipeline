@@ -15,6 +15,9 @@ def parse_args(**extra):
     p.add_argument("--limit", type=int, default=None,
                    help="cap each split to N images (smoke run)")
     p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--image-size", type=int, default=None,
+                   help="input resolution; 224 matches MedMNIST-C's own "
+                        "severity calibration, 64 is the legacy setting")
     p.add_argument("--dataset", default=None,
                    help="corpus to run on; scopes every output path")
     p.add_argument("--registry", default=None,
@@ -29,7 +32,10 @@ def setup(args):
     """Seed, select the corpus, load splits, return (train, val, test, info, n)."""
     # Must happen before anything touches config paths or the corruption
     # registry, since both are cached on first use.
-    if getattr(args, "dataset", None) or getattr(args, "registry", None):
+    if getattr(args, "image_size", None):
+        config.IMAGE_SIZE = int(args.image_size)
+    if (getattr(args, "dataset", None) or getattr(args, "registry", None)
+            or getattr(args, "image_size", None)):
         from robustmed import corruptions
         config.set_dataset(args.dataset or config.DATA_FLAG,
                            args.registry or args.dataset)
@@ -37,6 +43,7 @@ def setup(args):
 
     engine.set_seed()
     print("device:", engine.DEVICE)
+    print(f"resolution: {config.IMAGE_SIZE}px")
     print(f"dataset: {config.DATA_FLAG}  "
           f"(corruption registry: {config.CORRUPTION_REGISTRY_FLAG})")
     print(f"outputs: {config.ROOT / config.DATA_FLAG}")

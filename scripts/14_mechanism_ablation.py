@@ -1,11 +1,20 @@
-"""Stage 2b -- which mechanism buys robustness, at a fixed parameter budget?
+"""Stage 2b -- which mechanism buys robustness, at a fixed COMPUTE budget?
 
 Stage 2a compared whole architectures spanning 14k to 29M parameters. Two of the
 five never completed a CE-active run, so their mechanisms went unmeasured, and
 every difference that did appear was confounded with depth, width and training
 stability. This stage removes all of that: one skeleton, one budget, one
 mechanism switched on at a time, with each variant's width tuned to the same
-parameter count.
+budget.
+
+The budget is COMPUTE, not parameters, and at 224px that distinction is not
+pedantic. Measured on one CPU thread: convae at 14,067 params costs 55 MMACs and
+1.2 ms, while a same-resolution mechanism variant at 13,773 params costs 674
+MMACs and 38 ms -- 12x the compute and 33x the latency for the same parameter
+count, because convae downsamples twice and the others do not. Matching
+parameters would hand the same-resolution mechanisms a 12x compute advantage and
+call it a fair test. --budget-kind params is available for the capacity
+question, but it is not the efficiency question.
 
 It is analysed PAIRED BY SEED against the plain skeleton. Seed effects are
 shared across variants -- in Stage 2a seed 1 was the worst seed for every single
@@ -36,6 +45,11 @@ if __name__ == "__main__":
         mechanisms={"nargs": "+", "default": list(M.MECHANISMS)},
         seeds={"type": int, "nargs": "+", "default": [0, 1, 2]},
         budget={"type": int, "default": 14067},   # convae published
+        budget_kind={"default": "macs", "choices": ["macs", "params"],
+                     "help": "match compute (default) or parameters. At 224px "
+                             "equal parameters is NOT equal cost: convae is 12x "
+                             "cheaper in MACs than a same-resolution variant of "
+                             "the same size."},
         blocks={"type": int, "default": 2},
         lam={"type": float, "default": config.AE_LAMBDA_MAX},
         output={"default": config.RECOVERY_OUTPUT,
@@ -56,12 +70,21 @@ if __name__ == "__main__":
     print(f"  baseline clean={b1[data.CLEAN]:.4f}  "
           f"mean corrupted={np.mean([b1[c] for c in conds]):.4f}")
 
-    widths = {m: M.fit_width(m, args.budget, args.blocks) for m in args.mechanisms}
-    print(f"\nbudget {args.budget:,} params, {args.blocks} blocks:")
+    from robustmed import efficiency
+    if args.budget_kind == "macs":
+        target = args.budget if args.budget != 14067 else efficiency.macs(
+            models.build_recovery("convae", width=16, device=None))
+        widths = {m: M.fit_macs(m, target, args.blocks) for m in args.mechanisms}
+        print(f"\nbudget {target/1e6:.1f} MMACs @ {config.IMAGE_SIZE}px, "
+              f"{args.blocks} blocks:")
+    else:
+        target = args.budget
+        widths = {m: M.fit_width(m, target, args.blocks) for m in args.mechanisms}
+        print(f"\nbudget {target:,} params, {args.blocks} blocks:")
     for m, w in widths.items():
-        n = models.count_params(M.MechanismNet(width=w, mechanism=m,
-                                               blocks=args.blocks))
-        print(f"  {m:20s} width {w:>3d}  {n:>8,} params  ({n/args.budget:.1%})")
+        net = M.MechanismNet(width=w, mechanism=m, blocks=args.blocks)
+        print(f"  {m:20s} width {w:>3d}  {models.count_params(net):>8,} params  "
+              f"{(efficiency.macs(net) or 0)/1e6:>7.1f} MMACs")
 
     val_probe = engine.make_val_probe(val)
     rows = []

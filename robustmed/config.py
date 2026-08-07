@@ -12,7 +12,12 @@ ROOT = Path(os.environ.get("ROBUSTMED_ROOT", "runs"))
 # --- data ------------------------------------------------------------------
 SEED = 0
 DATA_FLAG = os.environ.get("ROBUSTMED_DATASET", "pneumoniamnist")
-IMAGE_SIZE = 64
+# MedMNIST-C calibrated its corruption severities at 224, so running there means
+# the fault model is cited rather than re-derived -- which is what makes the
+# resolution-vs-severity problem (B2) disappear instead of needing an answer.
+# Costs ~12x the pixels: the condition cache stops fitting in RAM and rendering
+# stops being a per-run expense, hence the disk cache in engine.
+IMAGE_SIZE = int(os.environ.get("ROBUSTMED_IMAGE_SIZE", 224))
 BATCH_SIZE = 128
 NUM_WORKERS = 2
 
@@ -29,6 +34,13 @@ CKPT_DIR = RESULT_DIR = FIG_DIR = None
 BASELINE1_CKPT = BASELINE2_CKPT = None
 
 
+def set_image_size(px):
+    """Change resolution and re-point every output path. Call before set_dataset."""
+    global IMAGE_SIZE
+    IMAGE_SIZE = int(px)
+    set_dataset(DATA_FLAG, CORRUPTION_REGISTRY_FLAG)
+
+
 def set_dataset(flag, registry_flag=None):
     """Point every output path at `flag`'s subtree and rebind the checkpoints.
 
@@ -41,7 +53,10 @@ def set_dataset(flag, registry_flag=None):
     DATA_FLAG = flag
     CORRUPTION_REGISTRY_FLAG = registry_flag or flag
 
-    base = ROOT / flag
+    # Resolution is part of the experiment identity, not a detail: a checkpoint
+    # trained at 64 is meaningless at 224 and the corruption severities mean
+    # different things. Scoping the path stops the two silently mixing.
+    base = ROOT / flag / f"r{IMAGE_SIZE}"
     CKPT_DIR, RESULT_DIR, FIG_DIR = (base / "checkpoints", base / "results",
                                      base / "figures")
     for _d in (ROOT, base, CKPT_DIR, RESULT_DIR, FIG_DIR):

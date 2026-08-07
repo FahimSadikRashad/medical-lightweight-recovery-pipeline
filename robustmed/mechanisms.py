@@ -117,6 +117,33 @@ class MechanismNet(RecoveryModule):
         return self.head(z)
 
 
+def fit_macs(mechanism, target_macs, blocks=2, lo=2, hi=256):
+    """Largest width whose MACs stay within budget.
+
+    Prefer this to fit_width for anything the paper calls an efficiency claim.
+    At 224px, matching parameters does NOT match cost: convae at 14,067 params
+    costs 55 MMACs and 1.2 ms on one CPU thread, while a same-resolution
+    mechanism variant at 13,773 params costs 674 MMACs and 38 ms -- 12x the
+    compute and 33x the latency for the same parameter count, because convae
+    downsamples twice and the others do not. Matching parameters would hand the
+    same-resolution mechanisms a 12x compute advantage and call it a fair test.
+    """
+    from . import efficiency
+
+    best = lo
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        m = MechanismNet(width=mid, mechanism=mechanism, blocks=blocks)
+        n = efficiency.macs(m)
+        if n is None:
+            raise RuntimeError("FlopCounterMode unavailable; cannot match MACs")
+        if n <= target_macs:
+            best, lo = mid, mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def fit_width(mechanism, target_params, blocks=2, lo=2, hi=256):
     """Largest width whose parameter count stays within `target_params`.
 
@@ -124,6 +151,9 @@ def fit_width(mechanism, target_params, blocks=2, lo=2, hi=256):
     different amounts per channel, so holding WIDTH fixed would silently hand
     the cheap ones more effective capacity and turn a mechanism comparison back
     into a capacity comparison.
+
+    NOTE: parameters are the wrong budget for an efficiency claim -- see
+    fit_macs. Use this only when the question is genuinely about capacity.
     """
     best = lo
     while lo <= hi:

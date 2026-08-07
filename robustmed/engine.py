@@ -222,7 +222,61 @@ def probe_balanced(ae, clf, x_uint8, y, batch_size=256):
     return float(balanced_accuracy_score(y.numpy(), np.array(preds)))
 
 
-def make_condition_cache(raw, conditions, limit=None):
+def cache_dir():
+    d = config.ROOT / config.DATA_FLAG / f"r{config.IMAGE_SIZE}" / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def make_condition_cache(raw, conditions, limit=None, on_disk=None):
+    """Render every evaluation condition once and keep it.
+
+    At 64px the whole grid is ~0.5 GB and lives in RAM. At 224px -- MedMNIST-C's
+    own calibration resolution -- it is ~6.2 GB, which does not, and rendering it
+    costs ~12x more CPU because ImageMagick works per pixel. So above a size
+    threshold the cache is written to disk as uint8 memmaps and reused across
+    RUNS, not merely within one. That turns a multi-hour render into a one-time
+    cost for the whole project.
+
+    A condition is deterministic given (image, corruption, severity, size), so
+    the file name carries all four and a stale cache cannot be silently reused
+    at the wrong resolution.
+    """
+    from . import data
+
+    if on_disk is None:                       # ~2 GB is where RAM stops being sane
+        on_disk = (len(conditions) * (limit or len(raw)) * 3
+                   * config.IMAGE_SIZE ** 2) > 2e9
+    if not on_disk:
+        return _cache_in_ram(raw, conditions, limit)
+
+    d, cache, n = cache_dir(), {}, limit or len(raw)
+    for i, cond in enumerate(conditions):
+        path = d / f"{cond}_n{n}_p{config.IMAGE_SIZE}.npy"
+        ypath = d / f"{cond}_n{n}_labels.npy"
+        if path.exists() and ypath.exists():
+            x = np.load(path, mmap_mode="r")
+            y = np.load(ypath)
+            status = "reused"
+        else:
+            loader = data.condition_loader(data.subset(raw, limit), cond)
+            xs, ys = [], []
+            for x01, yb in loader:
+                xs.append((x01 * 255).round().to(torch.uint8).numpy())
+                ys.append(yb.numpy())
+            x, y = np.concatenate(xs), np.concatenate(ys)
+            np.save(path, x)
+            np.save(ypath, y)
+            x = np.load(path, mmap_mode="r")
+            status = "rendered"
+        cache[cond] = (x, torch.from_numpy(y))
+        print(f"\r  {status} {i+1}/{len(conditions)} conditions", end="", flush=True)
+    total = sum(v[0].size for v in cache.values()) / 1e9
+    print(f"\r  {len(conditions)} conditions on disk at {d} ({total:.1f} GB)   ")
+    return cache
+
+
+def _cache_in_ram(raw, conditions, limit=None):
     """Render every evaluation condition ONCE as uint8 and reuse it.
 
     Corruptions go through ImageMagick on the CPU, one image at a time, inside
@@ -259,7 +313,12 @@ def eval_cached(recovery, classifier, cache, batch_size=256):
     for cond, (x_uint8, y) in cache.items():
         preds = []
         for i in range(0, len(y), batch_size):
-            xb = x_uint8[i:i + batch_size].to(DEVICE).float() / 255.0
+            chunk = x_uint8[i:i + batch_size]
+            # memmap slices come back as numpy; copy before torch takes them so
+            # the page stays mapped read-only
+            if not torch.is_tensor(chunk):
+                chunk = torch.from_numpy(np.ascontiguousarray(chunk))
+            xb = chunk.to(DEVICE).float() / 255.0
             preds += pipe(xb).argmax(1).cpu().tolist()
         ys, ps = y.numpy(), np.array(preds)
         out[cond] = {

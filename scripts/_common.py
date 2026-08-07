@@ -62,6 +62,17 @@ def setup(args):
             print(f"corruptions: {config.TRAIN_CORRUPTIONS} -> {picked} "
                   f"(matched by category to the {config.CORRUPTION_REGISTRY_FLAG} registry)")
             config.TRAIN_CORRUPTIONS = picked
+        # EVAL_CORRUPTIONS is the SAME hardcoded chest-X-ray triple and was never
+        # remapped -- only TRAIN_CORRUPTIONS was. Anything that calls
+        # data.eval_conditions() with no explicit corruptions (01_baseline1_frozen.py's
+        # "collapse under corruption" step) falls back to it, so on a registry
+        # missing gaussian_noise/gaussian_blur -- bloodmnist has neither -- the
+        # very first corrupted eval throws KeyError: 'gaussian_noise' out of
+        # corruptions.registry(), not a controlled skip.
+        if set(picked) != set(config.EVAL_CORRUPTIONS):
+            print(f"eval corruptions: {config.EVAL_CORRUPTIONS} -> {picked} "
+                  f"(matched by category to the {config.CORRUPTION_REGISTRY_FLAG} registry)")
+            config.EVAL_CORRUPTIONS = picked
     except Exception as exc:                     # registry needs ImageMagick
         print(f"note: could not check registry ({type(exc).__name__})")
     if args.limit:

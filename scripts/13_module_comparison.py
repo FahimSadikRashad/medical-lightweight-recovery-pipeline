@@ -57,8 +57,25 @@ if __name__ == "__main__":
                    "help": "reference arm for the paired-by-seed comparison"},
         output={"default": config.RECOVERY_OUTPUT,
                 "choices": list(config.RECOVERY_OUTPUTS)},
+        eval_limit={"type": int, "default": None,
+                    "help": "cap TEST images used for the corruption cache -- "
+                            "independent of --limit's smoke-run banner. Needed "
+                            "whenever a dataset's test split is too large to "
+                            "cache at this resolution (e.g. bloodmnist's 3,421 "
+                            "images vs pneumoniamnist's 624); try 624 to match."},
     )
     train, val, test, info, n_classes = setup(args)
+    if args.eval_limit and len(test) > args.eval_limit:
+        # A dataset's TEST split can be far larger than the one this pipeline was
+        # tuned against: bloodmnist's ~3,421 images would build a ~29 GB
+        # corruption cache at 224px, over the entire Kaggle disk quota by
+        # itself. This caps a real evaluation's N deliberately -- distinct from
+        # --limit's smoke-run banner -- so the number is reportable, just on a
+        # capped sample, and comparable in size to pneumoniamnist's own N=624.
+        est_gb = args.eval_limit * 3 * config.IMAGE_SIZE ** 2 * 66 / 1e9
+        print(f"eval-limit: capping test split {len(test)} -> {args.eval_limit} "
+              f"images (est. cache ~{est_gb:.1f} GB)")
+        test = data.subset(test, args.eval_limit)
     if args.epochs:
         config.AE_EPOCHS = args.epochs
     # Stage 2a: width=None makes build_recovery use each class's PUBLISHED dict.

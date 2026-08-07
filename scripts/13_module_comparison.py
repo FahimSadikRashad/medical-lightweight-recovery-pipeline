@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
     for arch in fixed:
         print(f"\n-- {arch} (non-learned) --", flush=True)
-        score(arch, arch, 0, None, models.build_recovery(arch))
+        score(arch, arch, 0, -1, models.build_recovery(arch))
 
     for arch in learned:
         for w in args.widths:
@@ -130,12 +130,33 @@ if __name__ == "__main__":
                 score(key, arch, w, seed, module)
 
     df = pd.DataFrame(rows)
+
+    # Worst-case over the FULL registry saturates: there is always some
+    # condition at chance, so every arm reports 0.500 and the metric stops
+    # discriminating. Recompute it excluding conditions no arm clears -- only
+    # knowable now that every arm has run, which is why this is a second pass
+    # rather than part of score().
+    unfixable = set(engine.unfixable_conditions(
+        [balanced(v) for k, v in raw.items() if k != "baseline1"], conds))
+    fixable = [c for c in conds if c not in unfixable]
+    print(f"\nunfixable by every arm: {len(unfixable)}/{len(conds)} conditions")
+    if len(fixable) < len(conds) // 2:
+        print("  !! more than half the grid is unfixable. That usually means the\n"
+              "     arms are undertrained, not that the conditions are hopeless.")
+    for i, r in enumerate(rows):
+        bal = balanced(raw[r["key"]])
+        wc, wv = engine.worst_case(bal, fixable)
+        r["worst_abs_all"], r["worst_condition_all"] = r["worst_abs"], r["worst_condition"]
+        r["worst_abs"], r["worst_condition"] = wv, wc
+        r["worst_gain"] = wv - b1[wc] if wc else float("nan")
+    df = pd.DataFrame(rows)
+
     store.save("module_comparison", raw)
     store.save_table("module_comparison", df)
 
     gain_cols = sorted(c for c in df.columns if c.startswith("gain_"))
     agg = df.groupby(["arm", "width"]).agg(
-        n=("seed", "count"), params=("params", "first"),
+        n=("key", "size"), params=("params", "first"),
         p_trained=("trained", "mean"),
         worst=("worst_abs", "mean"), worst_sd=("worst_abs", "std"),
         mCE=("mCE", "mean"), mean_gain=("mean_gain", "mean"),
@@ -148,9 +169,9 @@ if __name__ == "__main__":
     print(agg.to_string(index=False))
 
     print("\n=== read this ===")
-    # An arm that wins on the average while still damaging a category has not
-    # solved the problem, so rank on worst-case and flag negatives separately.
-    ranked = agg.sort_values("worst", ascending=False)
+    # Rank on worst-case, tie-break on mCE. Without the tie-break, arms that all
+    # bottom out at chance sort arbitrarily and a harmful arm can be crowned.
+    ranked = agg.sort_values(["worst", "mCE"], ascending=[False, True])
     for r in ranked.itertuples():
         neg = [c.replace("gain_", "") for c in gain_cols
                if getattr(r, c, 0) is not None and getattr(r, c, 0) < 0]
@@ -158,16 +179,27 @@ if __name__ == "__main__":
         print(f"  {r.arm:8s} w={r.width:<3d} ({r.params:>7,} params)  "
               f"worst={r.worst:.3f}  mCE={r.mCE:.3f}  trains {r.p_trained:.0%}{flag}")
 
-    best = ranked.iloc[0]
-    clean_arms = ranked[[all(getattr(r, c, 0) >= 0 for c in gain_cols)
-                         for r in ranked.itertuples()]]
-    print(f"\n  best worst-case : {best['arm']} w={int(best['width'])} "
-          f"({best['worst']:.3f})")
-    if clean_arms.empty:
-        print("  NO arm is non-negative on every category. The photometric gap\n"
-              "  Stage 1 found is not solved by any existing architecture --\n"
-              "  which is the opening K3 exists to fill.")
+    # identity is excluded from every recommendation: it scores exactly 0.000 on
+    # each category by construction, so "no category harmed" is trivially true
+    # for it and it would always be crowned. mCE < 1 is the real bar -- that is
+    # the point at which an arm beats doing nothing.
+    real = ranked[ranked["arm"] != "identity"]
+    useful = real[real["mCE"] < 1.0]
+    clean = real[[all(getattr(r, c, 0) >= 0 for c in gain_cols)
+                  for r in real.itertuples()]]
+
+    if not real.empty:
+        b = real.iloc[0]
+        print(f"\n  best worst-case (excl. identity): {b['arm']} w={int(b['width'])} "
+              f"-> {b['worst']:.3f}, mCE={b['mCE']:.3f}")
+    print(f"  arms that beat doing nothing (mCE < 1): "
+          f"{', '.join(useful['arm'].unique()) or 'NONE'}")
+
+    if clean.empty:
+        print("\n  NO arm is non-negative on every category. If the arms trained\n"
+              "  properly, that is the gap K3 exists to fill -- check p_trained\n"
+              "  and the lam ramp before believing it.")
     else:
-        c = clean_arms.iloc[0]
-        print(f"  best with no harmed category: {c['arm']} w={int(c['width'])}. "
-              f"Check whether K3 still adds anything over it.")
+        c = clean.iloc[0]
+        print(f"\n  best with no harmed category: {c['arm']} w={int(c['width'])}.\n"
+              "  K3 has to beat this, or this becomes the finding instead.")

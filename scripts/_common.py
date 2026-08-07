@@ -49,6 +49,21 @@ def setup(args):
     print(f"outputs: {config.ROOT / config.DATA_FLAG}")
     train, val, test, info = data.load_dataset()
     n = len(info["label"])
+
+    # TRAIN_CORRUPTIONS is chest-X-ray specific and does not exist in most
+    # registries -- gaussian_blur is missing from 6 of 12, gaussian_noise from
+    # 5. Re-pick one family per category from what this registry actually has,
+    # so the training protocol stays comparable across modalities even though
+    # the family names differ. No-op for chest X-ray.
+    try:
+        from robustmed import corruptions
+        picked = config.train_corruptions_for(corruptions.names())
+        if set(picked) != set(config.TRAIN_CORRUPTIONS):
+            print(f"corruptions: {config.TRAIN_CORRUPTIONS} -> {picked} "
+                  f"(matched by category to the {config.CORRUPTION_REGISTRY_FLAG} registry)")
+            config.TRAIN_CORRUPTIONS = picked
+    except Exception as exc:                     # registry needs ImageMagick
+        print(f"note: could not check registry ({type(exc).__name__})")
     if args.limit:
         print(f"\n{'='*66}\n  SMOKE RUN -- splits capped to {args.limit} images.\n"
               "  Results are for plumbing only and are NOT comparable.\n"

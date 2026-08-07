@@ -177,11 +177,13 @@ NON_LEARNED = {"identity": None, "box": BoxDenoiser, "unsharp": UnsharpFilter}
 def _learned():
     """Imported lazily so robustmed.arms can import RecoveryModule from here."""
     from . import arms
+    from . import mechanisms
     return {"convae": ConvAE, "dncnn": arms.DnCNN, "nafnet": arms.NAFNet,
-            "span": arms.SPAN, "safmn": arms.SAFMNet}
+            "span": arms.SPAN, "safmn": arms.SAFMNet,
+            "mech": mechanisms.MechanismNet}
 
 
-LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn")
+LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn", "mech")
 ARM_NAMES = tuple(NON_LEARNED) + LEARNED_NAMES
 
 

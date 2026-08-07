@@ -332,7 +332,7 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                    lr=config.AE_LR, lambda_max=config.AE_LAMBDA_MAX,
                    warmup=config.AE_WARMUP, residual=None,
                    val_probe=None, seed=None, tag=None,
-                   arch="convae", output=None):
+                   arch="convae", output=None, **arch_kw):
     """Perceptual-loss recovery module: MSE(recon, clean) + lam * CE(clf(recon), y).
 
     lam is 0 for the first `warmup` epochs then ramps to lambda_max. Pure MSE
@@ -350,7 +350,8 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
 
     from .models import build_recovery
 
-    ae = build_recovery(arch, width=width, residual=residual, output=output).to(DEVICE)
+    ae = build_recovery(arch, width=width, residual=residual, output=output,
+                        **arch_kw).to(DEVICE)
     opt = torch.optim.Adam(ae.parameters(), lr=lr)
     mse, ce = nn.MSELoss(), nn.CrossEntropyLoss()
     frozen_clf.eval()
@@ -421,6 +422,7 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
 
     path = config.ae_ckpt(width, seed=seed, tag=tag, arch=arch)
     torch.save({"model": ae.state_dict(), "width": width, "arch": arch,
+                "arch_kw": arch_kw,
                 "output": ae.output, "residual": ae.output == "residual",
                 "seed": seed, "tag": tag, "lambda_max": lambda_max,
                 "selected_epoch": best["epoch"] if select else epochs,
@@ -454,7 +456,8 @@ def load_recovery(width, seed=None, tag=None, arch=None):
     ck = torch.load(config.ae_ckpt(width, seed=seed, tag=tag, arch=arch),
                     map_location=DEVICE)
     ae = build_recovery(ck.get("arch", "convae"), width=ck["width"],
-                        output=ck.get("output")).to(DEVICE)
+                        output=ck.get("output"),
+                        **ck.get("arch_kw", {})).to(DEVICE)
     ae.load_state_dict(ck["model"])
     ae.eval()
     _attach_history(ae, ck.get("history", []),

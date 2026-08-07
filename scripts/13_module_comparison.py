@@ -53,6 +53,8 @@ if __name__ == "__main__":
                            "(Stage 2a) instead of sweeping widths"},
         seeds={"type": int, "nargs": "+", "default": [0, 1, 2]},
         lam={"type": float, "default": config.AE_LAMBDA_MAX},
+        pair_with={"default": None,
+                   "help": "reference arm for the paired-by-seed comparison"},
         output={"default": config.RECOVERY_OUTPUT,
                 "choices": list(config.RECOVERY_OUTPUTS)},
     )
@@ -196,6 +198,32 @@ if __name__ == "__main__":
 
     print("\n=== per arm x width ===")
     print(agg.to_string(index=False))
+
+    # --- paired comparison -------------------------------------------------
+    # Seed effects are shared across arms: seed 1 was the worst seed for every
+    # single arm in Stage 2a. An unpaired test throws that away and needs ~51
+    # seeds to resolve a 0.05 mCE gap; pairing on seed needs ~2, because the
+    # per-seed difference has sd 0.025 against 0.081 for the raw scores.
+    ref = args.pair_with
+    if ref is None:
+        trained = df[df["arm"].isin(models.LEARNED_NAMES) & df["ce_active"]]
+        ref = trained.groupby("arm")["mCE"].mean().idxmin() if len(trained) else None
+    if ref is not None and (df["arm"] == ref).any():
+        base = df[df["arm"] == ref].set_index("seed")["mCE"]
+        print(f"\n=== paired by seed, vs {ref} (negative = better than {ref}) ===")
+        print(f"  {'arm':10s}{'d(mCE)':>9s}{'+/-95%':>9s}{'p':>8s}   per-seed")
+        for arm, g in df[df["arm"] != ref].groupby("arm"):
+            g = g[g["seed"].isin(base.index)]
+            if len(g) < 2:
+                continue
+            d = np.array([r.mCE - base[r.seed] for r in g.itertuples()])
+            n = len(d)
+            from scipy import stats as _st
+            ci = _st.t.ppf(.975, n - 1) * d.std(ddof=1) / np.sqrt(n)
+            _, pv = _st.ttest_1samp(d, 0.0)
+            star = "  *" if pv < .05 else ""
+            print(f"  {arm:10s}{d.mean():>+9.3f}{ci:>9.3f}{pv:>8.3f}   "
+                  f"{np.round(d, 3).tolist()}{star}")
 
     print("\n=== read this ===")
     # If nothing trained, every learned arm collapsed to the same constant

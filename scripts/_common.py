@@ -43,7 +43,12 @@ def setup(args):
     train, val, test, info = data.load_dataset()
     n = len(info["label"])
     if args.limit:
-        print(f"smoke run: capping splits to {args.limit} images")
+        print(f"\n{'='*66}\n  SMOKE RUN -- splits capped to {args.limit} images.\n"
+              "  Results are for plumbing only and are NOT comparable.\n"
+              "  Recovery cannot learn from this little data before the lambda\n"
+              "  ramp reaches full strength, so arms collapse to the same\n"
+              "  constant output and every score converges to one number.\n"
+              f"  Drop --limit (and --epochs) for a real run.\n{'='*66}")
         train, val, test = (data.subset(s, args.limit) for s in (train, val, test))
     return train, val, test, info, n
 

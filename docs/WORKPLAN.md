@@ -27,42 +27,66 @@ architectures used as front-ends to frozen medical classifiers, evaluated on
 worst-case rather than mean performance, across modalities. This is the spine of
 the paper. The ConvAE is one arm in it, labelled as the naive baseline.
 
-**K2 — Finding: restoration objectives conflict in the compute-bounded regime.**
-Noise and compression want low-pass behaviour; blur wants high-pass. A full-size
-restoration network has capacity to learn both conditionally. A tiny module does
-not, so it compromises — and the compromise is measurable in the data we already
-have.
+**K2 — Finding: recovery generalizes across SEVERITY but not across corruption
+CATEGORY, and on one category it actively does harm.**
+Confirmed by the Stage 1 full-registry sweep (13 families x 5 severities, 6
+models). The earlier version of K2 said blur was the binding constraint. **That
+was wrong** — an artifact of only ever evaluating the 3 families we train on.
 
-> ⚠️ **Provisional until Stage 1, and B1 says it is probably too narrow.**
-> Everything below is derived from **3 of the pneumoniamnist registry's 13
-> families**. Of the 10 we never train on, **6 are photometric** — brightness ±,
-> contrast ±, gamma ±. Photometric corruption is a global intensity remap, and a
-> module built from spatial convolutions has no mechanism for it: neither
-> low-pass nor high-pass filtering corrects a gamma shift.
->
-> **Revised hypothesis to test in Stage 1:** the conflict is *three*-way, not
-> two-way — denoise (low-pass), deblur (high-pass), photometric (intensity
-> remap) — and the worst conditions will be photometric rather than blur.
-> If that holds, K2 gets stronger and K3 gains a third branch (a per-channel
-> affine/gamma correction, ~6 parameters). Stage 1 prints the category table
-> that settles it.
+| category | families | mean gain | reading |
+|---|---|---|---|
+| blur | 1 | **+0.172** | best-recovered category, not the problem |
+| codec | 2 | +0.150 | recovers well |
+| noise | 4 | +0.106 | baseline is at chance here; recovery rescues it |
+| **photometric** | 6 | **−0.056** | **recovery makes it WORSE than doing nothing** |
 
-| condition | severity slope (sev4 − sev0) | status |
-|---|---|---|
-| gaussian_noise | −0.004 | saturated — recovery reaches clean-level |
-| jpeg_compression | +0.003 | saturated |
-| **gaussian_blur** | **−0.047, worse in 11/11 runs** | **binding constraint** |
+The generalization boundary is sharp, and it is not severity:
 
-`gaussian_blur_sev4` is the worst condition in 10 of 11 trained runs. Remaining
-headroom is ~0.035 on noise/JPEG versus ~0.083 on strong blur — 2.4× larger.
-Capacity does not buy the difference: conditional on training, w=4 gives +0.221
-and w=32 gives +0.175 across a 48× parameter range.
+| group | mean gain |
+|---|---|
+| seen family, seen severity | +0.142 |
+| seen family, unseen severity | +0.124 |
+| **unseen family** | **+0.016** |
 
-**K3 — Method.** A gated module that resolves the conflict by routing rather than
-by adding capacity (§3).
+Severity extrapolation works. Category extrapolation does not. The two steepest
+severity slopes in the whole registry are `gamma_corr_down` (−0.272) and
+`brightness_up` (−0.244) — both photometric, both never trained on, both with
+negative gain. 4 of 6 models have their worst condition on a photometric family.
 
-**Appendix finding — output parameterization governs trainability at small
-scale.** 9 of 20 runs in the stability sweep produced no usable model, because
+**Mechanism.** Photometric corruption is a global intensity remap. The module is
+trained on noise/blur/jpeg and learns spatial filtering, which has no mechanism
+for it — so applied to a gamma-shifted image it perturbs without correcting, and
+lands below the untouched input. This is the three-way conflict the B1 dump
+predicted (low-pass / high-pass / intensity remap), and stronger than predicted:
+the third arm is not merely unhandled, it is actively damaging.
+
+**Capacity correction.** The plan previously claimed capacity buys nothing,
+citing w=4 → +0.221 vs w=32 → +0.175 conditional on training. That was
+**survivor bias**: only 1 of 5 w=4 runs survived versus 4 of 5 at w=32, so
+conditioning on survival compared a lucky narrow run against typical wide ones.
+With the output fixed and all 24 runs training, capacity helps monotonically:
+
+| width | params | worst-case | mCE | mean gain |
+|---|---|---|---|---|
+| 4 | 1,119 | 0.707 ± 0.062 | 0.687 | +0.094 |
+| 8 | 3,835 | 0.756 ± 0.058 | 0.644 | +0.129 |
+| 16 | 14,067 | 0.793 ± 0.035 | 0.545 | +0.172 |
+| 32 | 53,731 | 0.807 ± 0.040 | 0.518 | +0.195 |
+
+The "smallest wins" claim is dead. What replaces it is a real Pareto question,
+which is what Stage 2 measures.
+
+**K3 — Method.** A gated module that routes between operations rather than adding
+capacity, with two requirements Stage 1 turned from optional into mandatory:
+a **photometric branch** (per-channel affine/gamma, ~6 params) for the category
+spatial filtering cannot touch, and a learned **identity fallback** — because the
+measured failure is not "fails to help" but "actively harms," so knowing when to
+do nothing is worth more than any extra filtering capacity.
+
+**Appendix finding — CONFIRMED. Output parameterization governs trainability at
+small scale.** Stage 0 gate: failures went **9/20 under `clamp` to 0/24 under
+`residual`**, 100% training rate at every width, 6 seeds each. 9 of 20 runs in
+the original sweep produced no usable model, because
 `torch.clamp(out, 0, 1)` has zero gradient outside `[0,1]` and a non-residual
 decoder can initialise negative everywhere. Reproduced: seeds 1/w=4 and 2/w=8
 show 100% negative pre-clamp output and gradient exactly `0.00e+00` — precisely
@@ -214,8 +238,15 @@ broad-eval as primary, with one broad-train arm to bound the gap.
 | **SPANV2** | 2026 | near-pixel branch + depthwise-separable fusion | current NTIRE ESR winner (XiaomiMM). The strongest available "recent" arm. |
 | SAFMN *(optional)* | 2023 | spatially-adaptive feature modulation | lightweight-by-design; closest published motif to our gated module |
 
-Selection is principled rather than leaderboard-driven: blur binds, so the
-contenders are high-frequency reconstructors, and DnCNN is a control on purpose.
+**Selection rationale, revised after Stage 1.** The earlier version picked
+high-frequency reconstructors because blur was thought to bind. Blur turned out
+to be the *best*-recovered category (+0.172). What actually binds is photometric
+corruption, where recovery scores −0.056 — worse than doing nothing. So the axis
+that matters is not high-frequency reconstruction but **conditional behaviour**:
+can the architecture modulate what it does per input, including doing nothing?
+That raises SAFMN (spatially-adaptive feature modulation) from optional to a
+contender, and makes the gate the centrepiece rather than an add-on. DnCNN stays
+a control.
 
 **Where the tiny models actually live.** The NTIRE 2026 *denoising* challenge
 reports MambaIR and Restormer as the backbones of choice — both far outside our
@@ -240,8 +271,8 @@ Restormer (2022, and used at full scale in NTIRE 2026 — out of regime).
 8 arms × 3 widths × 6 seeds ≈ 144 runs.
 
 **Gate:** at least one learned module beats both non-learned controls on
-worst-case. If a fixed unsharp filter matches them, that is the finding and the
-paper changes shape — far better to learn it here than at Stage 4.
+worst-case *and* does not go negative on photometric. The second half is new:
+every arm must be checked for actively-harmful categories, not just weak ones.
 
 ### Stage 3 — the novel module (~4h GPU)
 

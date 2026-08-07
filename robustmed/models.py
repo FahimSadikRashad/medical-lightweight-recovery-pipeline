@@ -1,7 +1,9 @@
-"""Classifier, recovery autoencoder, and the non-learned control."""
+"""Classifier, recovery modules, and the non-learned controls."""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from . import config
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -46,18 +48,79 @@ class Classifier(nn.Module):
         return self
 
 
-class ConvAE(nn.Module):
-    """Recovery module. width scales capacity (w=4 is ~1k params).
+class RecoveryModule(nn.Module):
+    """Base class for every recovery arm: [0,1] -> [0,1].
 
-    residual=True predicts clean as input+correction, which protects clean
-    inputs from being smoothed. Reported results use residual=False --
-    check docs/FINDINGS.md before flipping it.
+    Subclasses implement `body(x)` and inherit one shared output
+    parameterization. That sharing is the point, not a convenience: the output
+    nonlinearity decides whether a tiny module trains at all, so letting each
+    architecture pick its own would confound the module comparison. Most modern
+    restoration architectures carry a global residual and would be immune to the
+    clamp trap below, making them look more stable than a plain encoder-decoder
+    for a reason that has nothing to do with their design.
+
+    output modes (config.RECOVERY_OUTPUT):
+      "clamp"     clamp(body(x)). ZERO gradient outside [0,1]. A decoder that
+                  initialises negative everywhere is dead permanently -- this
+                  produced 9 of 20 dead runs in the stability sweep, including
+                  two whose loss froze at exactly 0.3572 + lam*4.2037 for ten
+                  epochs. Kept only to reproduce that failure on demand.
+      "residual"  clamp(x + body(x)). Output starts at the input, so the clamp
+                  is nowhere near saturation at init.
+      "sigmoid"   sigmoid(body(x)). Gradient is never exactly zero.
     """
 
-    def __init__(self, width=16, residual=False):
+    def __init__(self, output=None):
         super().__init__()
+        self.output = output or config.RECOVERY_OUTPUT
+        if self.output not in config.RECOVERY_OUTPUTS:
+            raise ValueError(f"output must be one of {config.RECOVERY_OUTPUTS}")
+
+    def body(self, x):
+        raise NotImplementedError
+
+    def bound(self, x, raw):
+        if self.output == "sigmoid":
+            return torch.sigmoid(raw)
+        if self.output == "residual":
+            return torch.clamp(x + raw, 0.0, 1.0)
+        return torch.clamp(raw, 0.0, 1.0)
+
+    def forward(self, x):
+        return self.bound(x, self.body(x))
+
+    @torch.no_grad()
+    def saturation(self, x):
+        """Fraction of output elements sitting on a zero-gradient boundary.
+
+        The leading indicator of a dead run: a module at 1.0 here cannot learn,
+        because clamp passes no gradient through a saturated element. Logged per
+        epoch so a collapse is visible while it happens rather than afterwards.
+        """
+        raw = self.body(x)
+        if self.output == "sigmoid":
+            return float((raw.abs() > 12).float().mean())
+        pre = x + raw if self.output == "residual" else raw
+        return float(((pre < 0) | (pre > 1)).float().mean())
+
+
+class ConvAE(RecoveryModule):
+    """Naive baseline arm: plain conv encoder-decoder. width scales capacity.
+
+    This is the module the project started with. It is a baseline in the
+    comparison, not the subject of it.
+    """
+
+    def __init__(self, width=16, residual=None, output=None):
+        # `residual` is the legacy flag. It used to select x+delta directly;
+        # that behaviour now lives in output="residual", so map it across and
+        # keep old call sites and checkpoints working.
+        if output is None:
+            output = "residual" if residual else config.RECOVERY_OUTPUT
+        super().__init__(output=output)
         w = width
-        self.width, self.residual = width, residual
+        self.width = width
+        self.residual = self.output == "residual"
         self.enc = nn.Sequential(
             nn.Conv2d(3, w, 3, 2, 1), nn.ReLU(inplace=True),        # 64 -> 32
             nn.Conv2d(w, w * 2, 3, 2, 1), nn.ReLU(inplace=True),    # 32 -> 16
@@ -67,11 +130,8 @@ class ConvAE(nn.Module):
             nn.ConvTranspose2d(w, 3, 4, 2, 1),                             # 32 -> 64
         )
 
-    def forward(self, x):
-        out = self.dec(self.enc(x))
-        if self.residual:
-            out = x + out
-        return torch.clamp(out, 0.0, 1.0)
+    def body(self, x):
+        return self.dec(self.enc(x))
 
 
 class BoxDenoiser(nn.Module):
@@ -88,6 +148,44 @@ class BoxDenoiser(nn.Module):
 
     def forward(self, x):
         return torch.clamp(F.conv2d(x, self.kernel, padding=self.pad, groups=3), 0, 1)
+
+
+class UnsharpFilter(nn.Module):
+    """Non-learned control: fixed unsharp mask, zero parameters.
+
+    The counterpart to BoxDenoiser and the honest control for the
+    objectives-conflict claim. Blur is the binding condition in the sweep, and
+    blur wants a HIGH-pass operation -- so before crediting any learned module
+    with restoring blurred images, a fixed sharpener has to be shown not to do
+    the same thing. `amount` is the classic unsharp strength.
+    """
+
+    def __init__(self, k=3, amount=1.0):
+        super().__init__()
+        self.register_buffer("kernel", torch.ones(3, 1, k, k) / (k * k))
+        self.pad, self.amount = k // 2, amount
+
+    def forward(self, x):
+        low = F.conv2d(x, self.kernel, padding=self.pad, groups=3)
+        return torch.clamp(x + self.amount * (x - low), 0, 1)
+
+
+# --- arm registry ----------------------------------------------------------
+# Stage 2 adds DnCNN / NAFNet / SPAN / SPANV2 here. Each must subclass
+# RecoveryModule so it inherits the shared output parameterization.
+LEARNED = {"convae": ConvAE}
+NON_LEARNED = {"identity": None, "box": BoxDenoiser, "unsharp": UnsharpFilter}
+
+
+def build_recovery(arch="convae", width=16, **kw):
+    """One constructor for every arm, so sweep scripts don't branch on names."""
+    if arch in NON_LEARNED:
+        cls = NON_LEARNED[arch]
+        return None if cls is None else cls()
+    if arch not in LEARNED:
+        raise KeyError(f"unknown arch {arch!r}; have "
+                       f"{sorted(LEARNED) + sorted(NON_LEARNED)}")
+    return LEARNED[arch](width=width, **kw)
 
 
 def count_params(m):

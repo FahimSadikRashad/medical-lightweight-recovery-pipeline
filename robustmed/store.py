@@ -6,7 +6,7 @@ stage writes its numbers and later stages read them back.
 """
 import json
 
-from .config import RESULT_DIR
+from . import config
 
 # canonical names -- import these instead of typing strings
 BASELINE1 = "baseline1_frozen"
@@ -20,17 +20,18 @@ COMPOUND = "compound_corruptions"
 TRANSFER = "kermany_transfer"
 DATASET_STATS = "dataset_stats"
 STABILITY = "stability"
+CORRUPTION_SWEEP = "corruption_sweep"
 
 
 def save(name, payload):
-    path = RESULT_DIR / f"{name}.json"
+    path = config.RESULT_DIR / f"{name}.json"
     path.write_text(json.dumps(payload, indent=2, default=str))
     print(f"saved -> {path}")
     return path
 
 
 def load(name):
-    path = RESULT_DIR / f"{name}.json"
+    path = config.RESULT_DIR / f"{name}.json"
     if not path.exists():
         raise FileNotFoundError(f"{path} missing -- run that stage first (see docs/EXPERIMENTS.md)")
     return json.loads(path.read_text())
@@ -38,7 +39,7 @@ def load(name):
 
 def load_optional(name):
     """For figures that should still render when an experiment isn't done yet."""
-    path = RESULT_DIR / f"{name}.json"
+    path = config.RESULT_DIR / f"{name}.json"
     if not path.exists():
         print(f"note: {name} not run yet, skipping")
         return None
@@ -46,11 +47,11 @@ def load_optional(name):
 
 
 def save_table(name, df):
-    path = RESULT_DIR / f"{name}.csv"
+    path = config.RESULT_DIR / f"{name}.csv"
     df.to_csv(path, index=False)
     print(f"saved -> {path}")
     return path
 
 
 def available():
-    return sorted(p.stem for p in RESULT_DIR.glob("*.json"))
+    return sorted(p.stem for p in config.RESULT_DIR.glob("*.json"))

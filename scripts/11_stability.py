@@ -30,10 +30,9 @@ from _common import (balanced, config, data, engine, models, parse_args, setup,
                      store, frozen_baseline1)
 
 
-def variant_tag(lambda_max, residual):
+def variant_tag(lambda_max, output):
     """Distinct filename per variant, so runs never overwrite each other."""
-    tag = f"lam{lambda_max:g}"
-    return tag + "_res" if residual else tag
+    return f"lam{lambda_max:g}_{output}"
 
 
 if __name__ == "__main__":
@@ -41,7 +40,9 @@ if __name__ == "__main__":
         seeds={"type": int, "nargs": "+", "default": config.AE_SEEDS},
         widths={"type": int, "nargs": "+", "default": config.AE_WIDTHS},
         lambdas={"type": float, "nargs": "+", "default": [config.AE_LAMBDA_MAX]},
-        residual={"choices": ["false", "true", "both"], "default": "false"},
+        arch={"default": "convae"},
+        outputs={"nargs": "+", "default": [config.RECOVERY_OUTPUT],
+                 "choices": list(config.RECOVERY_OUTPUTS)},
     )
     train, val, test, info, n_classes = setup(args)
     if args.epochs:
@@ -54,59 +55,72 @@ if __name__ == "__main__":
     held = [c for c in corrupted
             if data.parse_condition(c)[1] == config.HOLDOUT_SEVERITY]
 
-    residuals = {"false": [False], "true": [True], "both": [False, True]}[args.residual]
     val_probe = engine.make_val_probe(val)
+    degenerate = engine.degenerate_conditions(b1, corrupted)
+    if degenerate:
+        print(f"\nnote: baseline already at chance on {len(degenerate)} condition(s): "
+              f"{degenerate}\n  -> excluded from worst-case, reported separately")
+    scored = [c for c in corrupted if c not in degenerate]
 
     print(f"\ngrid: {len(args.seeds)} seeds x {len(args.widths)} widths x "
-          f"{len(args.lambdas)} lambdas x {len(residuals)} residual = "
-          f"{len(args.seeds) * len(args.widths) * len(args.lambdas) * len(residuals)} runs")
+          f"{len(args.lambdas)} lambdas x {len(args.outputs)} outputs = "
+          f"{len(args.seeds) * len(args.widths) * len(args.lambdas) * len(args.outputs)} runs")
 
     rows, raw = [], {}
     for seed in args.seeds:
-        # config.SEED drives data.loader's generator, so setting it here is what
-        # makes the DATA ORDER vary across seeds too -- not just the weight init.
         config.SEED = seed
-        engine.set_seed(seed)
-        pair_loader = data.loader(
-            data.Pairs(train, config.TRAIN_CORRUPTIONS, config.TRAIN_SEVERITIES),
-            shuffle=True)
-
         for w in args.widths:
             for lam in args.lambdas:
-                for res in residuals:
-                    tag = variant_tag(lam, res)
+                for out_mode in args.outputs:
+                    tag = variant_tag(lam, out_mode)
                     key = f"s{seed}_w{w}_{tag}"
                     print(f"\n-- {key} --", flush=True)
 
-                    if config.ae_ckpt(w, seed=seed, tag=tag).exists():
-                        ae = engine.load_recovery(w, seed=seed, tag=tag)
+                    if config.ae_ckpt(w, seed=seed, tag=tag, arch=args.arch).exists():
+                        ae = engine.load_recovery(w, seed=seed, tag=tag, arch=args.arch)
                         print("  resumed from checkpoint")
                     else:
-                        # re-seed per run so runs are individually reproducible
+                        # Re-seed AND rebuild the loader per run. Building it once
+                        # per seed leaves its generator state advancing across the
+                        # width loop, so w=4 and w=32 saw different data orders
+                        # within one "seed" -- which is exactly what the seed is
+                        # supposed to control.
                         engine.set_seed(seed)
+                        pair_loader = data.loader(
+                            data.Pairs(train, config.TRAIN_CORRUPTIONS,
+                                       config.TRAIN_SEVERITIES),
+                            shuffle=True)
                         ae = engine.train_recovery(
                             w, clf, pair_loader, epochs=config.AE_EPOCHS,
-                            lambda_max=lam, residual=res,
+                            lambda_max=lam, output=out_mode, arch=args.arch,
                             val_probe=val_probe, seed=seed, tag=tag)
 
                     res_all = engine.eval_conditions(ae, clf, test, conditions)
                     raw[key] = res_all
                     bal = balanced(res_all)
                     n_collapsed = sum(engine.collapsed(v) for v in res_all.values())
+                    worst_c, worst_v = engine.worst_case(bal, scored)
 
                     rows.append({
-                        "seed": seed, "width": w, "lam": lam, "residual": res,
-                        "params": models.count_params(ae),
+                        "seed": seed, "width": w, "lam": lam, "output": out_mode,
+                        "arch": args.arch, "params": models.count_params(ae),
+                        # headline: the floor, not the average
+                        "worst_abs": worst_v,
+                        "worst_gain": worst_v - b1[worst_c] if worst_c else float("nan"),
+                        "worst_condition": worst_c,
+                        "mCE": engine.corruption_error(bal, b1, scored),
+                        # secondary
                         "mean_gain": float(np.mean([bal[c] - b1[c] for c in corrupted])),
                         "gain_holdout": float(np.mean([bal[c] - b1[c] for c in held])),
                         "clean_delta": bal[data.CLEAN] - b1[data.CLEAN],
                         "collapsed_conds": n_collapsed,
                         "total_collapse": n_collapsed == len(conditions),
+                        "trained": n_collapsed < len(conditions),
                     })
                     r = rows[-1]
-                    print(f"  -> mean_gain={r['mean_gain']:+.3f} "
-                          f"holdout={r['gain_holdout']:+.3f} "
-                          f"clean_delta={r['clean_delta']:+.3f} "
+                    print(f"  -> WORST={r['worst_abs']:.3f} on {r['worst_condition']} "
+                          f"(gain {r['worst_gain']:+.3f})  mCE={r['mCE']:.3f}  "
+                          f"mean_gain={r['mean_gain']:+.3f}  "
                           f"collapsed={n_collapsed}/{len(conditions)}", flush=True)
 
     df = pd.DataFrame(rows)
@@ -124,18 +138,36 @@ if __name__ == "__main__":
         from scipy import stats
         return float(stats.t.ppf(0.975, n - 1) * s.std(ddof=1) / np.sqrt(n))
 
-    agg = df.groupby(["width", "lam", "residual"]).agg(
+    # Aggregate over ALL seeds, and separately over the ones that trained.
+    # Pooling them averages a bimodal distribution: a dead run contributes a
+    # fixed, arch-independent number, so the pooled mean mostly measures the
+    # failure rate and its CI always spans zero. Both columns belong in the
+    # paper -- P(trains) is a property of the module, not a nuisance.
+    agg = df.groupby(["arch", "width", "lam", "output"]).agg(
         params=("params", "first"),
         n=("seed", "count"),
+        p_trained=("trained", "mean"),
+        worst_mean=("worst_abs", "mean"),
+        worst_ci95=("worst_abs", ci95),
+        mCE_mean=("mCE", "mean"),
         gain_mean=("mean_gain", "mean"),
         gain_std=("mean_gain", lambda s: s.std(ddof=1)),
-        gain_min=("mean_gain", "min"),
-        gain_max=("mean_gain", "max"),
         ci95=("mean_gain", ci95),
         holdout_mean=("gain_holdout", "mean"),
         clean_delta_mean=("clean_delta", "mean"),
         n_collapsed=("total_collapse", "sum"),
     ).reset_index()
+
+    live = df[df["trained"]]
+    if len(live):
+        agg_live = live.groupby(["arch", "width", "lam", "output"]).agg(
+            n_live=("seed", "count"),
+            worst_live=("worst_abs", "mean"),
+            worst_live_ci95=("worst_abs", ci95),
+            gain_live=("mean_gain", "mean"),
+            gain_live_ci95=("mean_gain", ci95),
+        ).reset_index()
+        agg = agg.merge(agg_live, on=["arch", "width", "lam", "output"], how="left")
     store.save_table("stability_summary", agg)
 
     print("\n=== aggregated over seeds ===")
@@ -143,17 +175,20 @@ if __name__ == "__main__":
 
     print("\n=== read this ===")
     for r in agg.itertuples():
-        sig = "" if np.isnan(r.ci95) else (
-            "  SIGNIFICANT" if abs(r.gain_mean) > r.ci95 else
-            "  CI SPANS ZERO -- not distinguishable from no recovery")
-        print(f"  w={r.width:<3d} lam={r.lam:<5g} res={str(r.residual):5s} "
-              f"({r.params:,} params)  gain={r.gain_mean:+.3f} +/-{r.ci95:.3f}  "
-              f"collapsed {r.n_collapsed}/{r.n}{sig}")
+        ci = getattr(r, "worst_live_ci95", float("nan"))
+        sig = "" if np.isnan(ci) else (
+            "" if getattr(r, "worst_live", 0) - ci > 0.5 else
+            "  CI TOUCHES CHANCE")
+        print(f"  {r.arch} w={r.width:<3d} lam={r.lam:<5g} out={r.output:8s} "
+              f"({r.params:,} params)  trains {r.p_trained:.0%}  "
+              f"worst={getattr(r, 'worst_live', float('nan')):.3f}+/-{ci:.3f}  "
+              f"mCE={r.mCE_mean:.3f}{sig}")
 
-    worst = agg.loc[agg["n_collapsed"].idxmax()]
-    if worst["n_collapsed"] > 0:
-        print(f"\nStill collapsing: {int(worst['n_collapsed'])}/{int(worst['n'])} seeds at "
-              f"w={int(worst['width'])} lam={worst['lam']:g} "
-              f"residual={worst['residual']}.")
-        print("If best-epoch selection did not fix it, the collapse happens from the\n"
-              "first epoch the CE term is active -- try a lower lambda or residual=True.")
+    dead = agg.loc[agg["n_collapsed"].idxmax()] if len(agg) else None
+    if dead is not None and dead["n_collapsed"] > 0:
+        print(f"\nStill collapsing: {int(dead['n_collapsed'])}/{int(dead['n'])} seeds at "
+              f"{dead['arch']} w={int(dead['width'])} lam={dead['lam']:g} "
+              f"output={dead['output']}.")
+        print("Check the grad_norm column in the per-epoch history. Exactly 0.0 means\n"
+              "the output saturated and no gradient reaches the weights -- rerun with\n"
+              "--outputs residual (or sigmoid), not a lower lambda.")

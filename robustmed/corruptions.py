@@ -8,18 +8,35 @@ Needs ImageMagick + wand -- run `robustmed.colab.install()` on a fresh Colab.
 import numpy as np
 from PIL import Image
 
-from .config import DATA_FLAG
+from . import config
 
 _registry = None
+_registry_flag = None
 
 
 def registry():
-    """Corruption objects for the dataset, keyed by name. Loaded once."""
-    global _registry
-    if _registry is None:
+    """Corruption objects for the dataset, keyed by name. Loaded once.
+
+    Keyed on CORRUPTION_REGISTRY_FLAG rather than DATA_FLAG, so a non-MedMNIST
+    corpus can borrow a modality-matched registry.
+    """
+    global _registry, _registry_flag
+    flag = config.CORRUPTION_REGISTRY_FLAG
+    if _registry is None or _registry_flag != flag:
         from medmnistc.corruptions.registry import CORRUPTIONS_DS
-        _registry = CORRUPTIONS_DS[DATA_FLAG]
+        if flag not in CORRUPTIONS_DS:
+            raise KeyError(
+                f"no MedMNIST-C registry for {flag!r}. Available: "
+                f"{sorted(CORRUPTIONS_DS)}. Set config.CORRUPTION_REGISTRY_FLAG "
+                f"to a modality-matched one.")
+        _registry, _registry_flag = CORRUPTIONS_DS[flag], flag
     return _registry
+
+
+def reset():
+    """Drop the cached registry -- call after switching datasets."""
+    global _registry, _registry_flag
+    _registry = _registry_flag = None
 
 
 def names():

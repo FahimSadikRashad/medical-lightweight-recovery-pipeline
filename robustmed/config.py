@@ -8,19 +8,47 @@ from pathlib import Path
 
 # --- where everything is written ------------------------------------------
 ROOT = Path(os.environ.get("ROBUSTMED_ROOT", "runs"))
-CKPT_DIR = ROOT / "checkpoints"
-RESULT_DIR = ROOT / "results"
-FIG_DIR = ROOT / "figures"
-
-for _d in (ROOT, CKPT_DIR, RESULT_DIR, FIG_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
 
 # --- data ------------------------------------------------------------------
 SEED = 0
-DATA_FLAG = "pneumoniamnist"
+DATA_FLAG = os.environ.get("ROBUSTMED_DATASET", "pneumoniamnist")
 IMAGE_SIZE = 64
 BATCH_SIZE = 128
 NUM_WORKERS = 2
+
+# Which MedMNIST-C corruption registry to borrow. Split from DATA_FLAG so a
+# non-MedMNIST corpus (Montgomery, Shenzhen, BUSI) can use a modality-matched
+# registry -- chest X-ray corpora borrow pneumoniamnist. This is a defensible
+# choice, not a free one: say so in the paper.
+CORRUPTION_REGISTRY_FLAG = os.environ.get("ROBUSTMED_REGISTRY", "") or DATA_FLAG
+
+# --- output directories, scoped per dataset --------------------------------
+# Scoped so a second corpus cannot silently overwrite the first one's results --
+# the failure that made the original multi-seed run look like a capacity finding.
+CKPT_DIR = RESULT_DIR = FIG_DIR = None
+BASELINE1_CKPT = BASELINE2_CKPT = None
+
+
+def set_dataset(flag, registry_flag=None):
+    """Point every output path at `flag`'s subtree and rebind the checkpoints.
+
+    Call before anything touches the filesystem. `corruptions.reset()` must
+    follow if the registry changed, since the registry is cached on first use.
+    """
+    global DATA_FLAG, CORRUPTION_REGISTRY_FLAG
+    global CKPT_DIR, RESULT_DIR, FIG_DIR, BASELINE1_CKPT, BASELINE2_CKPT
+
+    DATA_FLAG = flag
+    CORRUPTION_REGISTRY_FLAG = registry_flag or flag
+
+    base = ROOT / flag
+    CKPT_DIR, RESULT_DIR, FIG_DIR = (base / "checkpoints", base / "results",
+                                     base / "figures")
+    for _d in (ROOT, base, CKPT_DIR, RESULT_DIR, FIG_DIR):
+        _d.mkdir(parents=True, exist_ok=True)
+
+    BASELINE1_CKPT = CKPT_DIR / "baseline1_frozen.pt"
+    BASELINE2_CKPT = CKPT_DIR / "baseline2_augmented.pt"
 
 # --- severity convention ---------------------------------------------------
 # medmnistc's apply(img, severity) is 0-indexed into 5 severity levels.
@@ -51,8 +79,25 @@ AE_WARMUP = 2
 AE_SELECT_BEST = True         # keep the best epoch by validation balanced accuracy
 VAL_PROBE_N = 256             # val images per condition in the selection probe
 
+# How a recovery module maps its raw output back into [0,1]. This is NOT a
+# refinement -- it is the difference between training and not training.
+#   "clamp"    torch.clamp(y, 0, 1). ZERO gradient outside [0,1], so a decoder
+#              that initialises negative everywhere is dead permanently. This
+#              caused 9 of 20 stability runs to produce no usable model. Kept
+#              only so the regression check can reproduce the failure.
+#   "residual" clamp(x + delta). Starts in range, so the clamp rarely saturates.
+#   "sigmoid"  always-nonzero gradient, no residual path.
+# Every recovery module shares this, so the module comparison is not confounded
+# by some architectures carrying a global residual and others not.
+RECOVERY_OUTPUT = "residual"
+RECOVERY_OUTPUTS = ("clamp", "residual", "sigmoid")
+
+# A model predicting one class is collapsed, but so is one that predicts two and
+# sits at chance -- s0_w4 scored bal=0.5043 and the pred_counts test missed it.
+COLLAPSE_BAL = 0.52
+
 # Stability sweep (scripts/11_stability.py)
-AE_SEEDS = [0, 1, 2]
+AE_SEEDS = [0, 1, 2, 3, 4, 5]
 AE_LAMBDAS = [0.0, 0.25, 0.5, 1.0, 1.5]   # 0.0 doubles as the MSE-only ablation
 
 TRAIN_CORRUPTIONS = ["gaussian_noise", "gaussian_blur", "jpeg_compression"]
@@ -76,22 +121,24 @@ TRANSFER_SEVERITY = 2
 KERMANY_TEST_DIR = os.environ.get("KERMANY_TEST_DIR", "")
 
 # --- checkpoint filenames --------------------------------------------------
-BASELINE1_CKPT = CKPT_DIR / "baseline1_frozen.pt"
-BASELINE2_CKPT = CKPT_DIR / "baseline2_augmented.pt"
 
+def ae_ckpt(width, seed=None, tag=None, arch=None):
+    """Recovery module checkpoint path.
 
-def ae_ckpt(width, seed=None, tag=None):
-    """Recovery AE checkpoint path.
-
-    seed=None and tag=None reproduce the original single-run filename, so
-    existing checkpoints keep loading. Passing either scopes the file, which is
-    what lets a sweep over seeds/lambdas/residual run without runs silently
-    overwriting each other -- the failure that made the first multi-seed result
-    look like a capacity finding.
+    seed=None, tag=None and arch=None reproduce the original single-run filename,
+    so existing checkpoints keep loading. Passing any of them scopes the file,
+    which is what lets a sweep over arch/seed/lambda/output run without runs
+    silently overwriting each other -- the failure that made the first
+    multi-seed result look like a capacity finding.
     """
-    parts = [f"recovery_ae_w{width}"]
+    parts = ["recovery_ae" if arch in (None, "convae") else f"recovery_{arch}"]
+    parts.append(f"w{width}")
     if seed is not None:
         parts.append(f"s{seed}")
     if tag:
         parts.append(tag)
     return CKPT_DIR / ("_".join(parts) + ".pt")
+
+
+# Populate the paths for the default dataset at import time.
+set_dataset(DATA_FLAG, CORRUPTION_REGISTRY_FLAG)

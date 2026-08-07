@@ -78,9 +78,66 @@ def evaluate(model, loader):
     }
 
 
-def collapsed(result):
-    """True when the model predicts a single class -- the collapse signature."""
-    return len(result["pred_counts"]) == 1
+def collapsed(result, bal_floor=None):
+    """True when a run produced nothing usable.
+
+    Two signatures, because the first one alone undercounts. The original test
+    was `len(pred_counts) == 1` -- a single predicted class. But s0_w4 in the
+    stability sweep predicted two classes and still scored bal=0.5043, i.e. dead
+    on arrival, and was reported as healthy. Anything at or below chance is
+    collapsed regardless of how many classes it nominally emits.
+    """
+    floor = config.COLLAPSE_BAL if bal_floor is None else bal_floor
+    return (len(result["pred_counts"]) == 1
+            or result["balanced_accuracy"] <= floor)
+
+
+# --- worst-case and corruption-error metrics -------------------------------
+
+def worst_case(bal, conditions):
+    """(condition, balanced_accuracy) of the weakest condition in `conditions`.
+
+    The headline metric. Averaging over conditions answers "how does it do on
+    average", but the question is whether robustness holds up under EVERY
+    condition, which is a floor. The two differ: in the stability sweep the
+    mean-to-worst gap ranged from 0.009 to 0.084 across runs, so two modules
+    that tie on the mean can be six points apart on the floor.
+    """
+    present = [c for c in conditions if c in bal]
+    if not present:
+        return None, float("nan")
+    worst = min(present, key=lambda c: bal[c])
+    return worst, bal[worst]
+
+
+def corruption_error(bal, baseline_bal, conditions):
+    """mCE and relative mCE, Hendrycks & Dietterich (ICLR 2019) style.
+
+    Error is 1 - balanced_accuracy, normalized by the baseline's error on the
+    same condition, then averaged. mCE < 1 means more robust than the baseline.
+    A robustness reviewer expects this alongside balanced accuracy, and it is
+    what makes our numbers comparable to the corruption-robustness literature.
+    """
+    ratios = []
+    for c in conditions:
+        if c not in bal or c not in baseline_bal:
+            continue
+        denom = 1.0 - baseline_bal[c]
+        if denom <= 1e-8:            # baseline is perfect here; ratio undefined
+            continue
+        ratios.append((1.0 - bal[c]) / denom)
+    return float(np.mean(ratios)) if ratios else float("nan")
+
+
+def degenerate_conditions(baseline_bal, conditions, floor=None):
+    """Conditions where even the clean-trained baseline is already at chance.
+
+    Worst-case over a condition nobody can fix is not informative -- it would
+    silently define the floor for every arm. Report these as their own group.
+    """
+    floor = config.COLLAPSE_BAL if floor is None else floor
+    return [c for c in conditions
+            if c in baseline_bal and baseline_bal[c] <= floor]
 
 
 @torch.no_grad()
@@ -209,9 +266,10 @@ def train_classifier(model, train_loader, val_loader, ckpt_path,
 
 def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                    lr=config.AE_LR, lambda_max=config.AE_LAMBDA_MAX,
-                   warmup=config.AE_WARMUP, residual=config.AE_RESIDUAL,
-                   val_probe=None, seed=None, tag=None):
-    """Perceptual-loss autoencoder: MSE(recon, clean) + lam * CE(clf(recon), y).
+                   warmup=config.AE_WARMUP, residual=None,
+                   val_probe=None, seed=None, tag=None,
+                   arch="convae", output=None):
+    """Perceptual-loss recovery module: MSE(recon, clean) + lam * CE(clf(recon), y).
 
     lam is 0 for the first `warmup` epochs then ramps to lambda_max. Pure MSE
     (lambda_max=0) converges to the identity map and recovers nothing.
@@ -226,9 +284,9 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     """
     import copy
 
-    from .models import ConvAE
+    from .models import build_recovery
 
-    ae = ConvAE(width, residual=residual).to(DEVICE)
+    ae = build_recovery(arch, width=width, residual=residual, output=output).to(DEVICE)
     opt = torch.optim.Adam(ae.parameters(), lr=lr)
     mse, ce = nn.MSELoss(), nn.CrossEntropyLoss()
     frozen_clf.eval()
@@ -236,23 +294,37 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     select = val_probe is not None and config.AE_SELECT_BEST
     best = {"bal": -1.0, "state": None, "epoch": 0}
     history = []
+    label = f"{arch} w={width}"
 
     for ep in range(epochs):
         lam = 0.0 if ep < warmup else lambda_max * (ep - warmup + 1) / max(1, epochs - warmup)
         ae.train()
-        total, seen = 0.0, 0
+        total, seen, gnorm, batches = 0.0, 0, 0.0, 0
+        last_batch = None
         for cor, clean, y in pair_loader:
             cor, clean, y = cor.to(DEVICE), clean.to(DEVICE), y.to(DEVICE)
             out = ae(cor)
             loss = mse(out, clean) + lam * ce(frozen_clf(out), y)
             opt.zero_grad()
             loss.backward()
+            # Gradient norm BEFORE the step. A run that is dead reports exactly
+            # 0.0 here for every epoch -- that is the signature that separates a
+            # saturated-output failure from an ordinary bad run, and without it
+            # the two are indistinguishable in the loss curve alone.
+            gnorm += float(sum(p.grad.abs().sum() for p in ae.parameters()
+                               if p.grad is not None))
+            batches += 1
             opt.step()
             total += loss.item() * cor.size(0)
             seen += cor.size(0)
+            last_batch = cor
 
-        row = {"epoch": ep + 1, "lam": lam, "loss": total / seen}
-        msg = f"  [w={width}] ep{ep+1}/{epochs} lam={lam:.2f} loss={row['loss']:.4f}"
+        row = {"epoch": ep + 1, "lam": lam, "loss": total / seen,
+               "grad_norm": gnorm / max(1, batches),
+               "saturation": ae.saturation(last_batch) if last_batch is not None else float("nan")}
+        msg = (f"  [{label}] ep{ep+1}/{epochs} lam={lam:.2f} "
+               f"loss={row['loss']:.4f} grad={row['grad_norm']:.2e} "
+               f"sat={row['saturation']:.2f}")
         if val_probe is not None:
             row["val_bal"] = probe_balanced(ae, frozen_clf, *val_probe)
             msg += f" val_bal={row['val_bal']:.4f}"
@@ -262,15 +334,18 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                         "epoch": ep + 1}
                 msg += " *"
         history.append(row)
+        if row["grad_norm"] == 0.0:
+            msg += "  <- DEAD (zero gradient)"
         print(msg, flush=True)
 
     if select and best["state"] is not None:
         ae.load_state_dict(best["state"])
-        print(f"  [w={width}] selected epoch {best['epoch']} "
+        print(f"  [{label}] selected epoch {best['epoch']} "
               f"(val_bal={best['bal']:.4f}) of {epochs}")
 
-    path = config.ae_ckpt(width, seed=seed, tag=tag)
-    torch.save({"model": ae.state_dict(), "width": width, "residual": residual,
+    path = config.ae_ckpt(width, seed=seed, tag=tag, arch=arch)
+    torch.save({"model": ae.state_dict(), "width": width, "arch": arch,
+                "output": ae.output, "residual": ae.output == "residual",
                 "seed": seed, "tag": tag, "lambda_max": lambda_max,
                 "selected_epoch": best["epoch"] if select else epochs,
                 "history": history}, path)
@@ -279,10 +354,12 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     return ae
 
 
-def load_recovery(width, seed=None, tag=None):
-    from .models import ConvAE
-    ck = torch.load(config.ae_ckpt(width, seed=seed, tag=tag), map_location=DEVICE)
-    ae = ConvAE(ck["width"], residual=ck["residual"]).to(DEVICE)
+def load_recovery(width, seed=None, tag=None, arch=None):
+    from .models import build_recovery
+    ck = torch.load(config.ae_ckpt(width, seed=seed, tag=tag, arch=arch),
+                    map_location=DEVICE)
+    ae = build_recovery(ck.get("arch", "convae"), width=ck["width"],
+                        output=ck.get("output")).to(DEVICE)
     ae.load_state_dict(ck["model"])
     ae.eval()
     return ae

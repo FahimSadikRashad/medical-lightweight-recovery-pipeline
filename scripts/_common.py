@@ -5,7 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from robustmed import config, data, engine, models, store  # noqa: E402,F401
+from robustmed import (config, corruptions, data, engine, models,  # noqa: E402,F401
+                       store)
 
 
 def parse_args(**extra):
@@ -14,16 +15,32 @@ def parse_args(**extra):
     p.add_argument("--limit", type=int, default=None,
                    help="cap each split to N images (smoke run)")
     p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--dataset", default=None,
+                   help="corpus to run on; scopes every output path")
+    p.add_argument("--registry", default=None,
+                   help="MedMNIST-C corruption registry to borrow "
+                        "(defaults to --dataset; set for non-MedMNIST corpora)")
     for flag, kwargs in extra.items():
         p.add_argument(f"--{flag.replace('_', '-')}", **kwargs)
     return p.parse_args()
 
 
 def setup(args):
-    """Seed, load splits, return (train, val, test, info, n_classes)."""
+    """Seed, select the corpus, load splits, return (train, val, test, info, n)."""
+    # Must happen before anything touches config paths or the corruption
+    # registry, since both are cached on first use.
+    if getattr(args, "dataset", None) or getattr(args, "registry", None):
+        from robustmed import corruptions
+        config.set_dataset(args.dataset or config.DATA_FLAG,
+                           args.registry or args.dataset)
+        corruptions.reset()
+
     engine.set_seed()
     print("device:", engine.DEVICE)
-    train, val, test, info = data.load_medmnist()
+    print(f"dataset: {config.DATA_FLAG}  "
+          f"(corruption registry: {config.CORRUPTION_REGISTRY_FLAG})")
+    print(f"outputs: {config.ROOT / config.DATA_FLAG}")
+    train, val, test, info = data.load_dataset()
     n = len(info["label"])
     if args.limit:
         print(f"smoke run: capping splits to {args.limit} images")

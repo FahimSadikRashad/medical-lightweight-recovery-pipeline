@@ -71,12 +71,33 @@ def pretty(cond):
 
 # --- MedMNIST splits -------------------------------------------------------
 
-def load_medmnist():
+def load_dataset(flag=None):
+    """Returns (train, val, test, info) for any supported corpus.
+
+    The single entry point every stage script uses. MedMNIST flags load through
+    load_medmnist(); non-MedMNIST corpora (Montgomery, Shenzhen, BUSI, PCam)
+    register here and must expose the same contract -- an indexable split
+    yielding (PIL image, label) and an `info` dict with a "label" mapping -- so
+    they drop into the existing pipeline without touching the corruption,
+    training or evaluation code.
+    """
+    flag = flag or config.DATA_FLAG
+    if flag in EXTERNAL_LOADERS:
+        return EXTERNAL_LOADERS[flag]()
+    return load_medmnist(flag)
+
+
+# Stage 4 populates this: {"montgomery_shenzhen": fn, "busi": fn, ...}.
+# Each fn returns (train, val, test, info) matching load_medmnist's contract.
+EXTERNAL_LOADERS = {}
+
+
+def load_medmnist(flag=None):
     """Returns (train, val, test, info). Images stay PIL for the corruption API."""
     import medmnist
     from medmnist import INFO
 
-    info = INFO[config.DATA_FLAG]
+    info = INFO[flag or config.DATA_FLAG]
     cls = getattr(medmnist, info["python_class"])
     splits = [cls(split=s, download=True, size=config.IMAGE_SIZE, as_rgb=True)
               for s in ("train", "val", "test")]

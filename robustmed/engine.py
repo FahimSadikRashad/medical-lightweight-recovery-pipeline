@@ -398,7 +398,7 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                    lr=config.AE_LR, lambda_max=config.AE_LAMBDA_MAX,
                    warmup=config.AE_WARMUP, residual=None,
                    val_probe=None, seed=None, tag=None,
-                   arch="convae", output=None, **arch_kw):
+                   arch="convae", output=None, probe_batch_size=None, **arch_kw):
     """Perceptual-loss recovery module: MSE(recon, clean) + lam * CE(clf(recon), y).
 
     lam is 0 for the first `warmup` epochs then ramps to lambda_max. Pure MSE
@@ -411,6 +411,13 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     epoch was kept. Selection keeps the best epoch by validation balanced
     accuracy instead, and records the full curve so a collapse is visible after
     the fact rather than invisible.
+
+    probe_batch_size defaults to pair_loader's OWN batch size, not
+    probe_balanced's default of 256. Without this, a training batch scaled
+    down via --batch-size for a large published-config arm (NAFNet, MoCE-IR)
+    still hits the validation probe at 256 every single epoch -- which is how
+    NAFNet OOM'd inside probe_balanced with a training batch that itself fit
+    fine. The two batch sizes must never be allowed to disagree.
     """
     import copy
 
@@ -421,6 +428,7 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     opt = torch.optim.Adam(ae.parameters(), lr=lr)
     mse, ce = nn.MSELoss(), nn.CrossEntropyLoss()
     frozen_clf.eval()
+    probe_batch_size = probe_batch_size or getattr(pair_loader, "batch_size", None) or 256
 
     select = val_probe is not None and config.AE_SELECT_BEST
     best = {"bal": -1.0, "state": None, "epoch": 0}
@@ -469,7 +477,8 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
                f"loss={row['loss']:.4f} grad={row['grad_norm']:.2e} "
                f"sat={row['saturation']:.2f}")
         if val_probe is not None:
-            row["val_bal"] = probe_balanced(ae, frozen_clf, *val_probe)
+            row["val_bal"] = probe_balanced(ae, frozen_clf, *val_probe,
+                                            batch_size=probe_batch_size)
             msg += f" val_bal={row['val_bal']:.4f}"
             if select and row["val_bal"] > best["bal"]:
                 best = {"bal": row["val_bal"],
@@ -529,7 +538,8 @@ def probe_restoration_quality(ae, cache, batch_size=256):
 
 def train_restoration(width, pair_loader, val_cache, epochs=config.AE_EPOCHS,
                       lr=config.AE_LR, ssim_weight=0.5, seed=None, tag=None,
-                      arch="convae", output=None, **arch_kw):
+                      arch="convae", output=None, probe_batch_size=None,
+                      **arch_kw):
     """Classifier-free recovery training -- RQ-5's arm (docs/RQ_PAPER_MAP.md).
 
         loss = L1(recon, clean) + ssim_weight * (1 - SSIM(recon, clean))
@@ -561,6 +571,10 @@ def train_restoration(width, pair_loader, val_cache, epochs=config.AE_EPOCHS,
                         **arch_kw).to(DEVICE)
     opt = torch.optim.Adam(ae.parameters(), lr=lr)
     l1 = nn.L1Loss()
+    # Same fix as train_recovery's probe_batch_size: the validation probe must
+    # never use a bigger batch than training itself does, or scaling down
+    # --batch-size for a large arm only postpones the OOM to eval time.
+    probe_batch_size = probe_batch_size or getattr(pair_loader, "batch_size", None) or 256
 
     best = {"ssim": -1.0, "state": None, "epoch": 0}
     history = []
@@ -579,7 +593,7 @@ def train_restoration(width, pair_loader, val_cache, epochs=config.AE_EPOCHS,
             total += loss.item() * cor.size(0)
             seen += cor.size(0)
 
-        q = probe_restoration_quality(ae, val_cache)
+        q = probe_restoration_quality(ae, val_cache, batch_size=probe_batch_size)
         row = {"epoch": ep + 1, "loss": total / seen,
                "val_psnr": q["psnr"], "val_ssim": q["ssim"]}
         msg = (f"  [{label}] ep{ep+1}/{epochs} loss={row['loss']:.4f} "

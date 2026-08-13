@@ -63,6 +63,14 @@ if __name__ == "__main__":
                             "whenever a dataset's test split is too large to "
                             "cache at this resolution (e.g. bloodmnist's 3,421 "
                             "images vs pneumoniamnist's 624); try 624 to match."},
+        batch_size={"type": int, "default": None,
+                    "help": "override config.BATCH_SIZE for training only. "
+                            "Published-config arms are real restoration-scale "
+                            "networks at 224px -- DnCNN (no downsampling, 17 "
+                            "layers @ 64ch) and larger already OOM a 14.56GB "
+                            "GPU at the project default of 128. Lower this "
+                            "when running one arch at a time (e.g. 32 for "
+                            "dncnn/nafnet/span/safmn, 4-8 for moceir)."},
     )
     train, val, test, info, n_classes = setup(args)
     if args.eval_limit and len(test) > args.eval_limit:
@@ -166,20 +174,43 @@ if __name__ == "__main__":
                     engine.set_seed(seed)
                     pair_loader = data.loader(
                         data.Pairs(train, config.TRAIN_CORRUPTIONS,
-                                   config.TRAIN_SEVERITIES), shuffle=True)
+                                   config.TRAIN_SEVERITIES), shuffle=True,
+                        batch_size=args.batch_size)
                     module = engine.train_recovery(
                         w, clf, pair_loader, epochs=config.AE_EPOCHS,
                         lambda_max=args.lam, output=args.output, arch=arch,
                         val_probe=val_probe, seed=seed, tag=tag)
                 score(key, arch, w, seed, module)
 
+    # --- merge with any earlier invocation's results ----------------------
+    # Checkpoints already survive a rerun with different --arms (ae_ckpt's
+    # scoping + the "resumed from checkpoint" check above); the SAVED TABLE
+    # did not -- store.save/save_table simply overwrite, so running one arch
+    # per invocation (the practical fix for the OOM above: fresh process per
+    # arch resets GPU memory) used to silently discard every earlier arch's
+    # row the moment the next one saved. Union on `key` so it doesn't.
+    prev_raw = store.load_optional("module_comparison") or {}
+    prev_path = config.RESULT_DIR / "module_comparison.csv"
     df = pd.DataFrame(rows)
+    if prev_path.exists():
+        prev_df = pd.read_csv(prev_path)
+        keep = prev_df[~prev_df["key"].isin(df["key"])] if len(df) else prev_df
+        if len(keep):
+            print(f"\nmerging with {len(keep)} row(s) from a previous "
+                  f"invocation ({sorted(keep['arm'].unique())})")
+        df = pd.concat([keep, df], ignore_index=True) if len(df) else keep
+    raw = {**{k: v for k, v in prev_raw.items() if k not in raw}, **raw}
 
     # Worst-case over the FULL registry saturates: there is always some
     # condition at chance, so every arm reports 0.500 and the metric stops
     # discriminating. Recompute it excluding conditions no arm clears -- only
     # knowable now that every arm has run, which is why this is a second pass
     # rather than part of score().
+    # `rows` (this invocation's own list of dicts) is replaced by df's merged
+    # records here on purpose -- everything below must see every arch ever
+    # run, not just the ones this process trained, or "one arch per
+    # invocation" would compute unfixable/worst-case from a partial grid.
+    rows = df.to_dict("records")
     unfixable = set(engine.unfixable_conditions(
         [balanced(v) for k, v in raw.items() if k != "baseline1"], conds))
     fixable = [c for c in conds if c not in unfixable]

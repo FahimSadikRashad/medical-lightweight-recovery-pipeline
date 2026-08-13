@@ -62,8 +62,24 @@ def set_dataset(flag, registry_flag=None):
     for _d in (ROOT, base, CKPT_DIR, RESULT_DIR, FIG_DIR):
         _d.mkdir(parents=True, exist_ok=True)
 
-    BASELINE1_CKPT = CKPT_DIR / "baseline1_frozen.pt"
-    BASELINE2_CKPT = CKPT_DIR / "baseline2_augmented.pt"
+    BASELINE1_CKPT = clf_ckpt("baseline1_frozen")
+    BASELINE2_CKPT = clf_ckpt("baseline2_augmented")
+
+
+def clf_ckpt(name, arch=None):
+    """Classifier checkpoint path, scoped by CLF_ARCH.
+
+    arch=None (the default) reproduces the plain filename, so existing
+    baseline1_frozen.pt / baseline2_augmented.pt checkpoints trained under
+    MobileNetV2 keep loading unchanged. Any other arch gets its own suffixed
+    file, so a second frozen backbone (medvit) runs alongside the first
+    without silently overwriting it -- the same failure ae_ckpt's seed/tag
+    scoping exists to prevent for the recovery arms.
+    """
+    arch = arch or CLF_ARCH
+    suffix = "" if arch in (None, "mobilenet_v2") else f"_{arch}"
+    return CKPT_DIR / f"{name}{suffix}.pt"
+
 
 # --- severity convention ---------------------------------------------------
 # medmnistc's apply(img, severity) is 0-indexed into 5 severity levels.
@@ -74,6 +90,16 @@ N_SEVERITIES = 5
 # --- classifier (Baseline 1 and 2) -----------------------------------------
 CLF_EPOCHS = 10
 CLF_LR = 1e-4
+
+# Which frozen backbone the recovery module is trained/evaluated against.
+# "mobilenet_v2" is the original ImageNet-pretrained baseline; "medvit" is a
+# SECOND backbone (Manzari et al. 2023, ported in robustmed/classifiers.py)
+# run alongside it, not instead of it -- see that file's module docstring for
+# the architecture and the size confound it introduces (>30x MobileNetV2's
+# params, unmatched). Scoping checkpoints by CLF_ARCH (below) is what lets
+# both exist without one overwriting the other's baseline1_frozen.pt.
+CLF_ARCH = os.environ.get("ROBUSTMED_CLF_ARCH", "mobilenet_v2")
+CLF_ARCHS = ("mobilenet_v2", "medvit")
 
 # --- recovery autoencoder --------------------------------------------------
 AE_WIDTHS = [4, 8, 16, 32]

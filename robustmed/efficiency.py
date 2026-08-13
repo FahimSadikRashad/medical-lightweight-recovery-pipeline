@@ -24,6 +24,22 @@ import torch
 from . import config
 
 
+def _module_device(model):
+    """First tensor's device, checking buffers too.
+
+    The non-learned arms (box, unsharp) hold their filter as a registered
+    buffer with NO nn.Parameter, so a parameters()-only check sees an empty
+    iterator and defaults to CPU even when build_recovery placed the module's
+    buffer on CUDA -- and the input tensor built from that wrong guess then
+    mismatches the module's real device the moment a conv runs.
+    """
+    for t in model.parameters():
+        return t.device
+    for t in model.buffers():
+        return t.device
+    return torch.device("cpu")
+
+
 @torch.no_grad()
 def macs(model, image_size=None, batch=1):
     """Multiply-accumulates for one forward pass, via torch's FlopCounterMode.
@@ -38,9 +54,7 @@ def macs(model, image_size=None, batch=1):
     except ImportError:
         return None
     px = image_size or config.IMAGE_SIZE
-    x = torch.randn(batch, 3, px, px, device=next(model.parameters(),
-                                                  torch.zeros(1)).device
-                    if any(True for _ in model.parameters()) else "cpu")
+    x = torch.randn(batch, 3, px, px, device=_module_device(model))
     counter = FlopCounterMode(display=False)
     try:
         with counter:

@@ -42,6 +42,33 @@ better than a reviewer finding it.
 
 ---
 
+## ⚠️ A second novelty risk, found later: cost-aware routing is already published
+
+Same shape of problem as above, one level down. K3 (the not-yet-built module —
+see docs/RQ_PAPER_MAP.md's RQ-1/RQ-3 sections and the corruption-gating item in
+README's honest limitations) has been discussed as **routing between operations
+by cost** — e.g. a cheap path for mild/no corruption, a more expensive one when
+the input needs it. That specific idea has prior art at CVPR 2025, and it needs
+to be read before K3's design is finalized, not after.
+
+| Paper | Relevance |
+|---|---|
+| [**MoCE-IR** — Zamfir et al., CVPR 2025 (arXiv:2411.18466, [code](https://github.com/eduardzamfir/MoCE-IR))](https://arxiv.org/html/2411.18466v1) | **Read this first.** Mixture-of-complexity-experts: expert blocks of *varying computational size*, with a routing signal that biases toward the cheaper expert unless the input's degradation complexity demands more, and bypasses irrelevant experts at inference. Beats OneRestore by 0.64 dB while being among the smallest models compared. "Route between operations by cost" is their contribution, published, at full restoration scale — not an available novelty claim for K3 as stated. |
+| **M2Restore** | MoE Mamba-CNN with a dynamic degradation-aware expert router — same routing idea, different backbone mixture. |
+| ClusIR, SLER-IR, UniRestorer (ICLR 2026), RBaIR, channel-wise functional decomposition for degradation-agnostic IR | The same routing/expert-selection line, different granularity (cluster-guided, spherical layer-wise, mixture-of-conv-experts). Worth a pass to see which one's specific mechanism is closest to what K3 was going to do, since that is the one whose difference has to be named explicitly. |
+| [**A Survey on All-in-One Image Restoration** — Jiang et al., TPAMI 2025, vol. 47(12)](https://arxiv.org/) | Best entry point for this whole line: taxonomy, evaluation protocol, and a curated comparison repo. Did not exist in the original reading list above and should be read before re-deriving the taxonomy from scratch. |
+
+**What survives.** All of the above route at the scale of ordinary restoration
+models (10⁶–10⁷+ params, GPU-throughput regime) — none of it has been run at
+this project's ~10⁴-parameter, single-thread-CPU regime (RQ-M, RQ-D). So the
+open question is not "should recovery route by cost" — MoCE-IR already
+answered yes — but **whether cost-aware routing between experts is even
+affordable when the experts themselves are a few thousand parameters each**,
+where the router's own cost might dominate the thing it is supposed to save.
+That reframing is the one K3 can still claim; "we invented routing" cannot.
+
+---
+
 ## Tier 1 — before you run (affects design or claims)
 
 | Paper | Why now |
@@ -135,6 +162,24 @@ which bounds what any transfer result on them can mean.
 
 ---
 
+## MedViT — the second frozen backbone
+
+| Paper | Why |
+|---|---|
+| [**MedViT** — Manzari et al., *Computers in Biology and Medicine* 2023 (arXiv:2302.09462)](https://arxiv.org/abs/2302.09462) | Hybrid CNN-Transformer built specifically for medical image classification, ported in as `robustmed/classifiers.py` and run as a second frozen baseline alongside MobileNetV2 (config.CLF_ARCH). Purpose: RQ-5 (classifier-agnostic recovery) needs an architecturally *different* frozen classifier to test coupling against, not just a different size of the same CNN family. |
+
+**Read the size-confound caveat before citing any coupling result.** This port
+comes to 74.3M params against MobileNetV2's ~2.2M — over 30x, unmatched. Any
+difference in recovery-module transfer between the two backbones cannot yet be
+attributed to *architecture* versus *capacity* without a matched-scale control
+(narrow `depths`/`stem_chs` in `classifiers.py`, the same discipline `arms.py`
+applies via PUBLISHED vs. scaled configs). Also cite Manzari's robustness
+argument for the design directly, not secondhand — it is the paper's own
+motivation and worth checking against what MedMNIST-C's photometric-harm
+result would predict (docs/RQ_PAPER_MAP.md, H-1d).
+
+---
+
 ## Minimum viable reading
 
 If time is short, these five, in order:
@@ -165,3 +210,5 @@ Fill this in as you read; it prevents unsupported sentences later.
 | ~1k params is enough | **yours** — no prior work at this scale |
 | Capacity does not help | **yours** — needs the multi-seed error bars |
 | Recovery is classifier-coupled | task-network bias, discussed in arXiv:2404.01692 |
+| MedViT as the second frozen backbone | Manzari et al. 2023 — cite the paper's own robustness argument, not just the architecture |
+| K3 does not claim to invent cost-aware routing | MoCE-IR (CVPR 2025) and the routing-line papers above — cite as prior art, reframe K3's claim |

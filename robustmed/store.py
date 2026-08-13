@@ -21,6 +21,7 @@ TRANSFER = "kermany_transfer"
 DATASET_STATS = "dataset_stats"
 STABILITY = "stability"
 CORRUPTION_SWEEP = "corruption_sweep"
+CLASSIFIER_FREE = "classifier_free_restoration"
 
 
 def save(name, payload):

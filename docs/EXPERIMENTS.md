@@ -14,8 +14,17 @@ Start here when resuming. Every stage writes a JSON file to
 | 5 | Ablation vs box denoiser; recovery + augmentation stacked | `05_ablation.py` | `ablation`, `recovery_plus_aug` |
 | 6 | Sub-Q1 compound corruptions; Sub-Q2 Kermany transfer | `06_generalization.py` | `compound_corruptions`, `kermany_transfer` |
 | 7 | Figures 1–5 | `07_figures.py` | — |
+| 16 | RQ-5, classifier-free recovery: PSNR/SSIM + downstream accuracy, no CE term, all-in-one training | `16_classifier_free_restoration.py` | `classifier_free_restoration` |
 
 \* written by stage 4, not 3.
+
+**Stage 16 needs `13_module_comparison.py --published` run first** for the
+H-M2 comparison column (classifier-free mCE vs. the CE-guided mCE for the same
+architecture at the same published size) — otherwise it reports restoration
+quality alone. `--arms moceir` requires `--batch-size 4` or smaller; see
+[`robustmed/moceir.py`](../robustmed/moceir.py)'s deviations list for why
+(7.7GB measured at batch=2, 224px, CPU, backward pass — the project's default
+batch of 128 will exhaust memory).
 
 **The numbers in `FINDINGS.md` came from the original unseeded Colab run.** The
 restructured code seeds every RNG, so a rerun will not reproduce them digit for

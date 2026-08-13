@@ -23,6 +23,10 @@ def parse_args(**extra):
     p.add_argument("--registry", default=None,
                    help="MedMNIST-C corruption registry to borrow "
                         "(defaults to --dataset; set for non-MedMNIST corpora)")
+    p.add_argument("--clf-arch", default=None, choices=list(config.CLF_ARCHS),
+                   help="frozen classifier backbone; scopes checkpoint paths "
+                        "so a second backbone runs alongside the first "
+                        "instead of overwriting it (default: mobilenet_v2)")
     for flag, kwargs in extra.items():
         p.add_argument(f"--{flag.replace('_', '-')}", **kwargs)
     return p.parse_args()
@@ -34,8 +38,10 @@ def setup(args):
     # registry, since both are cached on first use.
     if getattr(args, "image_size", None):
         config.IMAGE_SIZE = int(args.image_size)
+    if getattr(args, "clf_arch", None):
+        config.CLF_ARCH = args.clf_arch
     if (getattr(args, "dataset", None) or getattr(args, "registry", None)
-            or getattr(args, "image_size", None)):
+            or getattr(args, "image_size", None) or getattr(args, "clf_arch", None)):
         from robustmed import corruptions
         config.set_dataset(args.dataset or config.DATA_FLAG,
                            args.registry or args.dataset)
@@ -46,6 +52,7 @@ def setup(args):
     print(f"resolution: {config.IMAGE_SIZE}px")
     print(f"dataset: {config.DATA_FLAG}  "
           f"(corruption registry: {config.CORRUPTION_REGISTRY_FLAG})")
+    print(f"classifier: {config.CLF_ARCH}")
     print(f"outputs: {config.ROOT / config.DATA_FLAG}")
     train, val, test, info = data.load_dataset()
     n = len(info["label"])

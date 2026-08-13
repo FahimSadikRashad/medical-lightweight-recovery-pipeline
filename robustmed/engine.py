@@ -305,6 +305,18 @@ def _cache_in_ram(raw, conditions, limit=None):
     return cache
 
 
+def chunk01(chunk):
+    """uint8 cache slice (tensor, or numpy from a memmap) -> float [0,1] on DEVICE.
+
+    Shared by eval_cached, probe_restoration_quality and the classifier-free
+    report script: a memmap slice comes back as numpy, and torch.from_numpy on
+    a read-only mapped page warns on every batch unless copied first.
+    """
+    if not torch.is_tensor(chunk):
+        chunk = torch.from_numpy(np.ascontiguousarray(chunk))
+    return chunk.to(DEVICE).float() / 255.0
+
+
 @torch.no_grad()
 def eval_cached(recovery, classifier, cache, batch_size=256):
     """eval_conditions() against a pre-rendered cache. Same return shape."""
@@ -313,12 +325,7 @@ def eval_cached(recovery, classifier, cache, batch_size=256):
     for cond, (x_uint8, y) in cache.items():
         preds = []
         for i in range(0, len(y), batch_size):
-            chunk = x_uint8[i:i + batch_size]
-            # memmap slices come back as numpy; copy before torch takes them so
-            # the page stays mapped read-only
-            if not torch.is_tensor(chunk):
-                chunk = torch.from_numpy(np.ascontiguousarray(chunk))
-            xb = chunk.to(DEVICE).float() / 255.0
+            xb = chunk01(x_uint8[i:i + batch_size])
             preds += pipe(xb).argmax(1).cpu().tolist()
         ys, ps = y.numpy(), np.array(preds)
         out[cond] = {
@@ -492,6 +499,115 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
     return ae
 
 
+@torch.no_grad()
+def probe_restoration_quality(ae, cache, batch_size=256):
+    """Mean PSNR/SSIM of ae(corrupted) vs the SAME cache's clean images,
+    across every non-clean condition in `cache`.
+
+    The selection criterion for train_restoration, playing the role
+    probe_balanced plays for train_recovery -- so a classifier-free run's
+    model selection never touches a classifier either. `cache` is whatever
+    make_condition_cache built (RAM or on-disk memmap); chunk01 handles both.
+    """
+    from torchmetrics.functional import peak_signal_noise_ratio as psnr
+    from torchmetrics.functional import structural_similarity_index_measure as ssim
+
+    ae.eval()
+    clean_x, _ = cache[data.CLEAN]
+    ps, ss = [], []
+    for cond, (x_uint8, y) in cache.items():
+        if cond == data.CLEAN:
+            continue
+        for i in range(0, len(y), batch_size):
+            cor = chunk01(x_uint8[i:i + batch_size])
+            cln = chunk01(clean_x[i:i + batch_size])
+            out = ae(cor)
+            ps.append(psnr(out, cln).item())
+            ss.append(ssim(out, cln).item())
+    return {"psnr": float(np.mean(ps)), "ssim": float(np.mean(ss))}
+
+
+def train_restoration(width, pair_loader, val_cache, epochs=config.AE_EPOCHS,
+                      lr=config.AE_LR, ssim_weight=0.5, seed=None, tag=None,
+                      arch="convae", output=None, **arch_kw):
+    """Classifier-free recovery training -- RQ-5's arm (docs/RQ_PAPER_MAP.md).
+
+        loss = L1(recon, clean) + ssim_weight * (1 - SSIM(recon, clean))
+
+    Unlike train_recovery, this path never touches a classifier: not in the
+    loss, and not in model selection -- probe_restoration_quality scores by
+    SSIM against the cached clean images, not through any frozen backbone.
+    The classifier only appears afterwards, as a downstream metric computed
+    by whoever calls this. That separation is what makes a comparison against
+    train_recovery's CE-guided arms an answer to H-M2 (does capacity
+    substitute for classifier guidance?) rather than a confound of "this one
+    also happened to see the classifier a little."
+
+    `pair_loader` should be built over the FULL corruption registry
+    (corruptions.names()), not config.TRAIN_CORRUPTIONS -- this arm's whole
+    premise is the all-in-one training regime the restoration literature
+    (MIRAGE, PromptIR, MoCE-IR) already uses, not this project's usual
+    3-family specialist protocol. `width=None` (the default call pattern for
+    this arm) builds each architecture at its PUBLISHED, real-restoration-
+    scale config -- this question is not the tiny-budget capacity sweep.
+    """
+    import copy
+
+    from torchmetrics.functional import structural_similarity_index_measure as ssim_fn
+
+    from .models import build_recovery
+
+    ae = build_recovery(arch, width=width, residual=None, output=output,
+                        **arch_kw).to(DEVICE)
+    opt = torch.optim.Adam(ae.parameters(), lr=lr)
+    l1 = nn.L1Loss()
+
+    best = {"ssim": -1.0, "state": None, "epoch": 0}
+    history = []
+    label = f"{arch} w={width} [classifier-free]"
+
+    for ep in range(epochs):
+        ae.train()
+        total, seen = 0.0, 0
+        for cor, clean, _y in pair_loader:
+            cor, clean = cor.to(DEVICE), clean.to(DEVICE)
+            out = ae(cor)
+            loss = l1(out, clean) + ssim_weight * (1.0 - ssim_fn(out, clean))
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total += loss.item() * cor.size(0)
+            seen += cor.size(0)
+
+        q = probe_restoration_quality(ae, val_cache)
+        row = {"epoch": ep + 1, "loss": total / seen,
+               "val_psnr": q["psnr"], "val_ssim": q["ssim"]}
+        msg = (f"  [{label}] ep{ep+1}/{epochs} loss={row['loss']:.4f} "
+              f"val_psnr={q['psnr']:.2f} val_ssim={q['ssim']:.4f}")
+        if q["ssim"] > best["ssim"]:
+            best = {"ssim": q["ssim"], "state": copy.deepcopy(ae.state_dict()),
+                    "epoch": ep + 1}
+            msg += " *"
+        history.append(row)
+        print(msg, flush=True)
+
+    if best["state"] is not None:
+        ae.load_state_dict(best["state"])
+        print(f"  [{label}] selected epoch {best['epoch']} "
+              f"(val_ssim={best['ssim']:.4f}) of {epochs}")
+
+    path = config.ae_ckpt(width, seed=seed, tag=tag, arch=arch)
+    torch.save({"model": ae.state_dict(), "width": width, "arch": arch,
+               "arch_kw": arch_kw, "output": ae.output,
+               "residual": ae.output == "residual", "seed": seed, "tag": tag,
+               "lambda_max": 0.0, "classifier_free": True,
+               "selected_epoch": best["epoch"], "history": history}, path)
+    print(f"saved -> {path}")
+    ae.eval()
+    _attach_history(ae, history, best["epoch"])
+    return ae
+
+
 def _attach_history(module, history, selected_epoch):
     """Record which epoch was kept, and whether the CE term was live in it.
 
@@ -508,6 +624,10 @@ def _attach_history(module, history, selected_epoch):
     module._selected_epoch = selected_epoch
     row = next((h for h in history if h["epoch"] == selected_epoch), None)
     module._ce_active = bool(row and row.get("lam", 0) > 0)
+    # train_restoration's rows carry val_ssim, never lam -- this is how a
+    # loaded checkpoint is told apart from a CE-guided one without an extra
+    # field the original checkpoints don't have.
+    module._classifier_free = bool(row and "val_ssim" in row)
 
 
 def load_recovery(width, seed=None, tag=None, arch=None):

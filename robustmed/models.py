@@ -9,29 +9,55 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def backbone(n_classes, pretrained=True):
-    """ImageNet MobileNetV2 with a fresh head.
+def _classifiers():
+    """Imported lazily, same reason arms/mechanisms are: keeps a plain
+    `import robustmed.models` from dragging in the classifier zoo."""
+    from . import classifiers
+    return {"medvit": classifiers.MedViT}
 
-    Defined once. The original notebook redefined this five times -- that is
-    how the two baselines silently drift apart.
+
+CLASSIFIER_NAMES = ("mobilenet_v2", "medvit")
+
+
+def backbone(n_classes, pretrained=True, arch="mobilenet_v2"):
+    """The frozen backbone, dispatched by name.
+
+    Defined once. The original notebook redefined MobileNetV2 five times --
+    that is how the two baselines silently drift apart. `arch` is the second
+    frozen backbone this project runs alongside it -- see classifiers.py for
+    why (RQ-5, classifier-agnostic recovery) and for the size-confound this
+    introduces (>30x params vs MobileNetV2, not matched).
     """
-    from torchvision import models
-    weights = models.MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
-    m = models.mobilenet_v2(weights=weights)
-    m.classifier[1] = nn.Linear(m.classifier[1].in_features, n_classes)
-    return m
+    if arch == "mobilenet_v2":
+        from torchvision import models
+        weights = models.MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None
+        m = models.mobilenet_v2(weights=weights)
+        m.classifier[1] = nn.Linear(m.classifier[1].in_features, n_classes)
+        return m
+
+    zoo = _classifiers()
+    if arch not in zoo:
+        raise KeyError(f"unknown classifier arch {arch!r}; have {CLASSIFIER_NAMES}")
+    cls = zoo[arch]
+    if pretrained:
+        print(f"note: no pretrained weights available for classifier arch "
+              f"{arch!r} -- training from scratch (see classifiers.py)")
+    return cls(n_classes, pretrained=False, **getattr(cls, "PUBLISHED", {}))
 
 
 class Classifier(nn.Module):
     """Takes [0,1] tensors and normalizes internally.
 
     Keeping normalization here is what lets one loader feed both the AE
-    (pixel space) and the classifier.
+    (pixel space) and the classifier -- and it is shared across every
+    classifier arch, not just MobileNetV2, so the [0,1]/ImageNet-normalized
+    contract in data.py never has to know which backbone is frozen behind it.
     """
 
-    def __init__(self, n_classes, pretrained=True):
+    def __init__(self, n_classes, pretrained=True, arch=None):
         super().__init__()
-        self.net = backbone(n_classes, pretrained)
+        self.arch = arch or config.CLF_ARCH
+        self.net = backbone(n_classes, pretrained, arch=self.arch)
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1))
         self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1))
 
@@ -178,12 +204,13 @@ def _learned():
     """Imported lazily so robustmed.arms can import RecoveryModule from here."""
     from . import arms
     from . import mechanisms
+    from . import moceir
     return {"convae": ConvAE, "dncnn": arms.DnCNN, "nafnet": arms.NAFNet,
             "span": arms.SPAN, "safmn": arms.SAFMNet,
-            "mech": mechanisms.MechanismNet}
+            "mech": mechanisms.MechanismNet, "moceir": moceir.MoCEIR}
 
 
-LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn", "mech")
+LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn", "mech", "moceir")
 ARM_NAMES = tuple(NON_LEARNED) + LEARNED_NAMES
 
 

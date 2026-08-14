@@ -205,12 +205,14 @@ def _learned():
     from . import arms
     from . import mechanisms
     from . import moceir
+    from . import k3
     return {"convae": ConvAE, "dncnn": arms.DnCNN, "nafnet": arms.NAFNet,
             "span": arms.SPAN, "safmn": arms.SAFMNet,
-            "mech": mechanisms.MechanismNet, "moceir": moceir.MoCEIR}
+            "mech": mechanisms.MechanismNet, "moceir": moceir.MoCEIR,
+            "k3": k3.K3Restorer}
 
 
-LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn", "mech", "moceir")
+LEARNED_NAMES = ("convae", "dncnn", "nafnet", "span", "safmn", "mech", "moceir", "k3")
 ARM_NAMES = tuple(NON_LEARNED) + LEARNED_NAMES
 
 

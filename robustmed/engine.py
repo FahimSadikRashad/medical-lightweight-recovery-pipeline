@@ -465,6 +465,16 @@ def train_recovery(width, frozen_clf, pair_loader, epochs=config.AE_EPOCHS,
             gnorm += float(sum(p.grad.abs().sum() for p in ae.parameters()
                                if p.grad is not None))
             batches += 1
+            # Clip AFTER measuring gnorm (the raw, unclipped norm is what
+            # makes the "DEAD" 0.00e+00 signature meaningful -- clipping first
+            # would hide exactly the spike this is meant to catch) and BEFORE
+            # the step. Every collapse observed this session -- NAFNet at
+            # 29M, K3's complexity mode at 163K -- shows the same shape: a
+            # huge gradient the instant lambda activates, one step past the
+            # clamp boundary, then permanently zero gradient afterward. This
+            # is the preventive fix train_restoration already had for the
+            # equivalent instability; train_recovery did not.
+            torch.nn.utils.clip_grad_norm_(ae.parameters(), max_norm=1.0)
             opt.step()
             total += loss.item() * cor.size(0)
             seen += cor.size(0)

@@ -146,8 +146,15 @@ if __name__ == "__main__":
                 ssim_weight=args.ssim_weight, seed=args.seed, tag=tag, arch=arch)
 
         params = models.count_params(ae)
-        quality = category_quality(ae, test_cache, conds)
-        res = engine.eval_cached(ae, clf, test_cache)
+        # Same class of bug already fixed in 13_module_comparison.py's score():
+        # category_quality/eval_cached default to batch_size=256 regardless of
+        # --batch-size, so a training batch scaled down for a large arm (SPAN
+        # here) still hits FINAL EVALUATION at 256 -- which is exactly what
+        # OOM'd inside SPAN's cat-of-4-feature-maps, mid-run, after training
+        # had already completed successfully.
+        eval_batch_size = args.batch_size or 256
+        quality = category_quality(ae, test_cache, conds, batch_size=eval_batch_size)
+        res = engine.eval_cached(ae, clf, test_cache, batch_size=eval_batch_size)
         bal = balanced(res)
         mCE = engine.corruption_error(bal, b1, conds)
         mean_gain = float(np.mean([bal[c] - b1[c] for c in conds]))
@@ -174,8 +181,25 @@ if __name__ == "__main__":
                       f"mCE {ce_mCE:.3f} -> classifier-free {mCE:.3f}  [{verdict}]")
         rows.append(row)
 
+    # --- merge with any earlier invocation's results -----------------------
+    # Same overwrite bug 13_module_comparison.py had and was fixed for: each
+    # separate `--arms X` invocation used to REPLACE classifier_free_
+    # restoration.csv/json instead of merging into it, silently discarding
+    # every arch trained in an earlier invocation the moment the next one
+    # saved. Union on `arm` so running one arch per invocation actually
+    # accumulates, the way the OOM-driven "one arch at a time" workflow
+    # tonight requires.
     df = pd.DataFrame(rows)
-    store.save(store.CLASSIFIER_FREE, rows)
+    prev_path = config.RESULT_DIR / "classifier_free_restoration.csv"
+    if prev_path.exists():
+        prev_df = pd.read_csv(prev_path)
+        keep = prev_df[~prev_df["arm"].isin(df["arm"])] if len(df) else prev_df
+        if len(keep):
+            print(f"\nmerging with {len(keep)} row(s) from a previous "
+                  f"invocation ({sorted(keep['arm'].unique())})")
+        df = pd.concat([keep, df], ignore_index=True) if len(df) else keep
+
+    store.save(store.CLASSIFIER_FREE, df.to_dict("records"))
     store.save_table("classifier_free_restoration", df)
 
     # --- restoration table, in the shared-image's own shape --------------

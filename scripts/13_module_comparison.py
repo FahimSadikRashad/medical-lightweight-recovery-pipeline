@@ -51,6 +51,14 @@ if __name__ == "__main__":
         published={"action": "store_true",
                    "help": "build each arm at its paper's configuration "
                            "(Stage 2a) instead of sweeping widths"},
+        deploy={"action": "store_true",
+                "help": "run each arm at config.DEPLOYABLE_WIDTHS's "
+                        "budget-matched medium tier (~500K and ~1.9M params) "
+                        "instead of --widths/--published. Tests the PROVEN "
+                        "multi-scale mechanism (convae) against NAFNet's own "
+                        "multi-scale design at a size that doesn't destabilize "
+                        "it the way its 29M published config does. Arms with "
+                        "no entry in DEPLOYABLE_WIDTHS fall back to --widths."},
         seeds={"type": int, "nargs": "+", "default": [0, 1, 2]},
         lam={"type": float, "default": config.AE_LAMBDA_MAX},
         pair_with={"default": None,
@@ -90,6 +98,9 @@ if __name__ == "__main__":
     # These are reference rows -- the ceiling each concept reaches when it is not
     # compressed -- not entries in the compute-bounded comparison.
     widths = [None] if args.published else args.widths
+    if args.deploy and args.published:
+        print("note: --deploy overrides --published -- using DEPLOYABLE_WIDTHS, "
+              "not each arm's paper configuration")
 
     clf = frozen_baseline1(n_classes)
     conds = [data.condition(n, s) for n in corruptions.names()
@@ -109,19 +120,36 @@ if __name__ == "__main__":
     val_probe = engine.make_val_probe(val)
     learned = [a for a in args.arms if a in models.LEARNED_NAMES]
     fixed = [a for a in args.arms if a in models.NON_LEARNED]
-    print(f"\ngrid: {len(fixed)} non-learned + {len(learned)} learned x "
-          f"{len(widths)} config(s) x {len(args.seeds)} seeds = "
-          f"{len(fixed) + len(learned) * len(widths) * len(args.seeds)} models")
-    if args.published:
-        for a in learned:
-            m = models.build_recovery(a, width=None)
-            print(f"    {a:8s} {models.count_params(m):>11,} params  "
-                  f"{getattr(type(m), 'PUBLISHED', 'default')}")
+
+    def arch_widths(arch):
+        """--deploy gives each arm its OWN width list from DEPLOYABLE_WIDTHS
+        (budget-matched across arms, not shared) -- falls back to --widths
+        for any arch with no entry there."""
+        if args.deploy:
+            return config.DEPLOYABLE_WIDTHS.get(arch, widths)
+        return widths
+
+    n_models = sum(len(arch_widths(a)) * len(args.seeds) for a in learned)
+    print(f"\ngrid: {len(fixed)} non-learned + {len(learned)} learned arms x "
+          f"{len(args.seeds)} seeds = {len(fixed) + n_models} models")
+    for a in learned:
+        aw = arch_widths(a)
+        print(f"    {a:8s} widths={aw}  " + "  ".join(
+            f"w={w}:{models.count_params(models.build_recovery(a, width=w)):,}"
+            for w in aw))
 
     rows, raw = [], {"baseline1": b1_raw}
 
+    # eval_cached defaults to batch_size=256 regardless of --batch-size --
+    # inference has no backward graph to retain, so it usually tolerates a
+    # bigger batch than training does, but NAFNet's 29M params at 224px still
+    # OOM'd here even under no_grad (one layer's own activation tensor still
+    # has to exist while it's computed). Reuse the training override as the
+    # eval batch too rather than leave a second hardcoded 256 to trip over.
+    eval_batch_size = args.batch_size or 256
+
     def score(key, arch, width, seed, module):
-        res = engine.eval_cached(module, clf, cache)
+        res = engine.eval_cached(module, clf, cache, batch_size=eval_batch_size)
         raw[key] = res
         bal = balanced(res)
         n_collapsed = sum(engine.collapsed(v) for v in res.values())
@@ -162,7 +190,12 @@ if __name__ == "__main__":
         score(arch, arch, 0, -1, models.build_recovery(arch))
 
     for arch in learned:
-        for w in widths:
+        # --deploy is only a WIDTH-selection convenience -- the training
+        # recipe for e.g. convae w=96 is identical whether that 96 came from
+        # --deploy's preset or a plain --widths 96, so key/tag deliberately do
+        # NOT encode --deploy: a checkpoint trained one way is reused the
+        # other, rather than silently duplicated under a second name.
+        for w in arch_widths(arch):
             for seed in args.seeds:
                 tag = f"lam{args.lam:g}_{args.output}"
                 key = f"{arch}_{'published' if w is None else f'w{w}'}_s{seed}"

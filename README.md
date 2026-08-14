@@ -33,6 +33,29 @@ robust training. All of it requires *retraining*. This project asks a different
 question: **what if the classifier cannot be touched?** Regulatory-frozen
 deployments, third-party models, on-device inference.
 
+**And most of the restoration literature answers a different question than
+the deployment one.** The current all-in-one restoration frontier — MIRAGE
+(ICLR 2026), MoCE-IR (CVPR 2025), NAFNet (ECCV 2022) — is genuinely efficient
+*relative to itself*: MIRAGE-T beats full MoCE-IR (25.35M params, 75G FLOPs)
+at 6.21M params and 16G FLOPs. But every number in that comparison is GPU
+FLOPs; none of it reports single-thread CPU latency, the number that matters
+for edge/consumer/regulatory-frozen hardware. And even MIRAGE-T is still
+three to five orders of magnitude larger than what this project asks about.
+Two threads follow from that gap, not one:
+
+1. **How small can recovery be at all** — this project's original question,
+   and its headline finding (below): capacity does not help, and the winning
+   architecture is ~1-4×10⁴ params.
+2. **How close to retraining-based performance (Baseline 2's ~0.90 accuracy)
+   can a genuinely deployable-size design get** — not by adopting a published
+   architecture wholesale (NAFNet at 29M destabilizes under this project's
+   loss; DnCNN at 558K trains but ends up *worse than doing nothing*, mCE
+   > 1 — both measured, not assumed), but by scaling the mechanism this
+   project has already shown to work — multi-scale downsampling — up to a
+   budget-matched deployable tier (~500K–1.9M params) instead of trying every
+   architecture at its own, uncontrolled published size. In progress; see
+   `docs/RQ_PAPER_MAP.md`'s RQ-3 section and `config.DEPLOYABLE_WIDTHS`.
+
 So the classifier is frozen after training and a small recovery module is
 inserted upstream:
 

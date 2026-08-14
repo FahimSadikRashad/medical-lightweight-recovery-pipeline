@@ -3,88 +3,81 @@
 Zamfir et al., CVPR 2025, arXiv:2411.18466 -- "Complexity Experts are
 Task-Discriminative Learners for Any Image Restoration." Continues the
 routing-inspiration note in docs/RELATED_WORK.md's "cost-aware routing is
-already published" section: this is that mechanism, ported in rather than
-described secondhand, so this project's own routing claims (if any) have to
-be stated as a difference from THIS, not from a summary of it.
+already published" section.
 
-Architecture, per the paper (arXiv:2411.18466v1) and its equations 1-7:
+REWRITE NOTE. The first version of this file was built from the paper's prose
+and equations alone. Reading the actual source
+(github.com/eduardzamfir/MoCE-IR/blob/main/src/net/moce_ir.py) turned up
+several real differences, and this rewrite follows the code, not the earlier
+guesses:
 
-    backbone     Restormer-style U-Net. 3x3 stem, 4 encoder levels (depths
-                 4,6,6,8; level 4 is the bottleneck, no downsample after it),
-                 3 decoder levels (depths 2,4,4) with additive skips, channel
-                 width doubling per encoder level from `width`.
-    encoder blk  norm -> MDTA (channel/'transposed' self-attention, linear in
-                 image size) -> residual, norm -> GDFN (gated-dconv FFN) -> residual.
-    decoder blk  same, but MDTA is replaced by a MoCELayer (below).
+  - The backbone is 4-5x SHALLOWER than assumed: num_blocks=[1,1,1,3],
+    num_dec_blocks=[1,1,1] (9 blocks total), not a Restormer-scale
+    enc(4,6,6,8)/dec(2,4,4) guess (42 blocks). Down/up-sampling is
+    PixelUnshuffle/PixelShuffle (lossless channel-space reshaping), not
+    plain strided conv.
+  - Each complexity expert projects down to a small CONSTANT `rank` (default
+    2) BEFORE any patch operation, and stays at that width until projecting
+    back up. Complexity varies via kernel_size ([3,5,7,9]), patch_size
+    ([4,8,16,32]) and per-expert DEPTH (linearly increasing), not primarily
+    via channel width as the first port assumed. This is the actual reason
+    real MoCE-IR-S is affordable at patch_size=32: the expensive op runs on
+    ~2 channels, not tens of channels.
+  - "FFTAttention" is not softmax attention. It computes
+    rfft2(q) * rfft2(k), inverts, and gates v with the result -- by the
+    convolution theorem that is a circular convolution of q and k in the
+    spatial domain, computed at O(N log N) via the FFT instead of O(N^2) for
+    literal windowed self-attention. THIS is the actual fix for the memory
+    blowup the first port hit (7.7GB at batch=2, 224px): that port used
+    direct windowed attention because it had not yet found this class.
+  - The shared-expert gate is SiLU, not a raw multiply: `body(x) *
+    F.silu(proj(shared))`.
+  - The router adds a frequency-embedding term to its gate logits (high-pass
+    filtered bottleneck features through an MLP) and the auxiliary loss uses
+    a proper Normal-CDF-based load term (Shazeer-style), not a plain
+    bincount. NEITHER is reproduced here -- the router below is avg-pool +
+    linear only, and the aux loss is the simpler CV-based form from the
+    paper's own equations 5-7, not the code's exact load term. Named, not
+    silently dropped: do not cite this file's router or aux loss as a code
+    match, only its backbone and expert mechanism.
 
-    MoCELayer    n=4 nested "complexity experts", each a windowed
-                 self-attention at channel dim r_i = C/2^i and window size
-                 w_i = 2^(1+i) for i in 1..n, i.e. 4/8/16/32 (Eq. 2 uses
-                 2^(2+i) = 8/16/32/64; halved here -- see the deviations list,
-                 this is the direct consequence of dropping FFT-WSA) --
-                 narrower channels and a
-                 SMALLER window make the early experts cheap and local; later
-                 experts get more channels and a bigger window, i.e. more
-                 receptive field, at higher cost. Plus one SHARED expert (an
-                 MDTA over the whole feature map) whose output modulates
-                 whichever complexity expert was selected, by elementwise
-                 multiply (Eq. 1): y = complexity_expert(x) * shared(x).
+Architecture, as rebuilt from source:
 
-    router       Top-1 per SAMPLE (not per token), Eq. 4: g(x) =
-                 top1(softmax(Wx + eps)), eps ~ N(0, 1/n^2) added during
-                 training only. Only the chosen expert actually runs for each
-                 sample -- that dispatch pattern IS "irrelevant experts
-                 bypassed at inference" (Eq. 3's claim); it is not a separate
-                 optimization on top of top-1 routing, it falls out of it.
+    backbone     Restormer-style U-Net: 3x3 stem, 3 encoder levels (depths
+                 1,1,1) + a 4th bottleneck level (depth 3), all via MDTA
+                 (channel/'transposed' attention, linear in image size);
+                 PixelUnshuffle(2)+conv halves resolution/doubles channels
+                 between levels. Decoder: 3 levels (depths 1,1,1), MDAB
+                 replaced by MoCELayer; PixelShuffle(2)+conv undoes it,
+                 additive skip from the matching encoder level.
 
-    cost bias    b_i = p_i / max(p), the "spring force" of the paper's title
-                 (Eq. 6) -- a fixed, parameter-count-derived bias that enters
-                 the auxiliary load-balancing loss (Eq. 5, 7), pulling routing
-                 toward the cheaper expert unless the harder degradation
-                 outweighs it.
+    MoCELayer    n=4 nested experts (FFTExpert below), each: 1x1 project
+                 C -> rank (constant, default 2), `depth_i` blocks of
+                 (FFT-mix q,k then gate v) at `kernel_size_i`, 1x1 project
+                 rank -> C. kernel_sizes=[3,5,7,9], patch_sizes=[4,8,16,32],
+                 depths=[1,2,3,4] (stage_depth=1, linear). Plus one shared
+                 MDTA over the full block whose SiLU-gated output multiplies
+                 the selected expert's output.
 
-Deviations from the official implementation, named rather than taken silently
-(this file has NOT had arms.py's numeric parameter-count verification pass --
-do that before citing an exact match to the paper's 11.47M/25.35M):
+    router       Top-1 per SAMPLE, Eq. 4 form: avg-pool -> linear -> logits,
+                 + N(0, 1/n^2) noise during training, softmax, argmax. Only
+                 the chosen expert runs per sample -- dispatch IS the
+                 "irrelevant experts bypassed" property, not a separate step.
 
-  - Each expert's attention is a direct windowed self-attention, not the
-    paper's FFT-accelerated version ("FFT-WSA"). Same representational
-    mechanism (attention restricted to a window, at a shrunk channel width);
-    the FFT is a speed trick this port does not reproduce, so its FLOPs
-    number will not match the paper's even where the parameter count does.
-    Direct attention cost is O(window^4) per window (an N=window^2 token
-    attention matrix), so the paper's literal 8/16/32/64 progression OOM'd
-    at 224px in testing -- the largest window, applied at near-full decoder
-    resolution with many windows per image, produced multi-gigabyte attention
-    tensors per batch. Window sizes are halved to 4/8/16/32 here specifically
-    to stay tractable without the FFT accelerator; this is a direct,
-    load-bearing consequence of the deviation above, not an independent choice.
-  - Even after halving the windows: measured 7.7GB peak RSS for batch=2,
-    224px, one forward+backward pass, on CPU. This project's default
-    BATCH_SIZE is 128 -- running this arch at that batch size WILL exhaust
-    memory. scripts/16_classifier_free_restoration.py therefore excludes
-    "moceir" from its default --arms and expects a much smaller --batch-size
-    (4-8) when it is requested explicitly; do not add it to any sweep that
-    assumes the project's usual batch size without checking this first.
-  - The auxiliary loss (Eq. 5-7) is COMPUTED (MoCEIR.aux_loss, accumulated
-    across every decoder block after a forward pass) but NOT wired into any
-    training loop in this codebase -- engine.train_restoration does not add
-    it. Routing therefore currently trains on the reconstruction signal
-    alone. The paper's own motivation predicts this biases routing away from
-    the cost-aware behaviour that is this module's whole point; wire the aux
-    loss in before reporting a claim about WHICH expert gets chosen and why.
-  - No skip-connection fusion conv: decoder levels add the upsampled feature
-    to its matching encoder skip directly (the same idiom arms.py's NAFNet
-    already uses here, `z = up(z) + skip`), not concatenate-then-project.
-    Restormer's own decoder does the latter; this halves the extra
-    parameters that convention would add and was not something this
-    checked against the source for a match.
-  - Backbone dimensions (GDFN expansion ratio, head counts per level, no
-    separate 'refinement' stage after the last decoder level) are a
-    reasonable Restormer-style U-Net, not verified line-by-line against the
-    paper's own backbone the way MDTA/GDFN's textbook forms are. Treat the
-    MoCELayer mechanism as the verified part of this file and the backbone
-    around it as an approximation carrying that mechanism.
+    cost bias    b_i = p_i / max(p) enters the auxiliary loss (paper's
+                 spring-force framing); computed and returned, NOT wired into
+                 any training loop in this codebase -- same caveat as before.
+
+VERIFIED, not estimated: 3,371,328 params (down from the first port's
+10,030,679 -- the real depths are far shallower and the constant tiny rank
+removes most of what the first port spent on expert width). At 224px, batch=8
+trains (peak 7.47GB RSS); batch=16 does not. That is a genuine ~4x batch
+improvement over the first port, which OOM'd even at batch=2 -- the FFT-mix
+rewrite is a real fix, not just documentation. Still far short of matching the
+paper's own 11.47M for MoCE-IR-S; the router's missing frequency-embedding
+term and the simplified aux loss are the most likely places that gap comes
+from. Use --batch-size 8, not the earlier guess of 2-4, if this arm is
+selected in scripts/13 or scripts/16.
 """
 import torch
 import torch.nn as nn
@@ -93,34 +86,16 @@ import torch.nn.functional as F
 from .models import RecoveryModule
 
 
-def window_partition(x, win):
-    """BCHW -> (B*num_windows, C, win, win). Requires H, W divisible by win --
-    callers pad first (see ComplexityExpert)."""
-    b, c, h, w = x.shape
-    x = x.view(b, c, h // win, win, w // win, win)
-    windows = x.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, c, win, win)
-    return windows, (h // win, w // win)
-
-
-def window_reverse(windows, win, grid, b):
-    gh, gw = grid
-    c = windows.shape[1]
-    x = windows.view(b, gh, gw, c, win, win)
-    return x.permute(0, 3, 1, 4, 2, 5).contiguous().view(b, c, gh * win, gw * win)
-
-
 class MDTA(nn.Module):
-    """Multi-Dconv-head transposed attention (Restormer, Zamfir et al.'s own
-    backbone). Attention computed across CHANNELS, not spatial tokens --
-    the CxC map per head is what keeps this linear in image size, unlike
-    ordinary self-attention's NxN. Used both as the encoder's plain attention
-    and, unmodified, as the MoCELayer's shared expert S(x).
+    """Multi-Dconv-head transposed attention (Restormer). Attention computed
+    across CHANNELS, not spatial tokens -- linear in image size. Used as the
+    encoder's plain attention and as the MoCELayer's shared expert.
 
     Returns (out, 0.0) rather than a bare tensor, so TransformerBlock can
     treat every attn module -- MDTA or MoCELayer -- identically.
     """
 
-    def __init__(self, c, heads=4):
+    def __init__(self, c, heads=1):
         super().__init__()
         self.heads = heads
         self.temperature = nn.Parameter(torch.ones(heads, 1, 1))
@@ -143,8 +118,7 @@ class MDTA(nn.Module):
 
 
 class GDFN(nn.Module):
-    """Gated-Dconv feed-forward network (Restormer): 1x1 expand to 2x hidden,
-    depthwise 3x3, split in half, GELU-gate one half by the other, 1x1 project."""
+    """Gated-Dconv feed-forward network (Restormer)."""
 
     def __init__(self, c, expand=2.66):
         super().__init__()
@@ -159,13 +133,11 @@ class GDFN(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """norm -> attn -> residual, norm -> GDFN -> residual. `attn` is MDTA for
-    encoder blocks, a MoCELayer for decoder blocks -- both return (out, aux),
-    so this class never has to know which one it holds."""
+    """norm -> attn -> residual, norm -> GDFN -> residual."""
 
     def __init__(self, c, attn):
         super().__init__()
-        self.norm1 = nn.GroupNorm(1, c)          # LayerNorm2d, same choice arms.py's NAFBlock makes
+        self.norm1 = nn.GroupNorm(1, c)
         self.attn = attn
         self.norm2 = nn.GroupNorm(1, c)
         self.ffn = GDFN(c)
@@ -177,82 +149,98 @@ class TransformerBlock(nn.Module):
         return x + self.ffn(self.norm2(x))
 
 
-class ComplexityExpert(nn.Module):
-    """One nested complexity expert: project C -> r, windowed self-attention
-    at window size `window`, project back to C. See the module docstring's
-    first deviation for the FFT-WSA vs direct-attention difference."""
+class FFTExpert(nn.Module):
+    """One nested complexity expert -- 'ModExpert' + 'FFTAttention' in the
+    real source. Projects C -> a small CONSTANT `rank` first; every
+    subsequent op runs on `rank` channels, which is what keeps this cheap
+    even at patch_size=32 (see module docstring).
 
-    def __init__(self, c, r, window, heads=1):
+    `depth` sequential (q,k,v) triples, each: FFT(q)*FFT(k) inverted (a
+    circular convolution of q,k via the convolution theorem, global receptive
+    field at O(N log N)), gating v. Residual per block.
+    """
+
+    def __init__(self, c, rank, kernel_size, patch_size, depth):
         super().__init__()
-        self.window, self.heads, self.r = window, heads, r
-        self.proj_in = nn.Conv2d(c, r, 1)
-        self.qkv = nn.Conv2d(r, r * 3, 1, bias=False)
-        self.proj_out = nn.Conv2d(r, c, 1)
-        self.scale = (r // heads) ** -0.5
+        self.patch_size = patch_size
+        self.proj_in = nn.Conv2d(c, rank, 1)
+        pad = kernel_size // 2
+        self.blocks = nn.ModuleList([
+            nn.ModuleDict({
+                "q": nn.Conv2d(rank, rank, kernel_size, padding=pad),
+                "k": nn.Conv2d(rank, rank, kernel_size, padding=pad),
+                "v": nn.Conv2d(rank, rank, kernel_size, padding=pad),
+            }) for _ in range(depth)])
+        self.proj_out = nn.Conv2d(rank, c, 1)
+
+    def _fft_mix(self, blk, z):
+        b, c, h, w = z.shape
+        p = self.patch_size
+        ph, pw = (-h) % p, (-w) % p
+        zp = F.pad(z, (0, pw, 0, ph))
+        hp, wp = zp.shape[-2:]
+        q, k, v = blk["q"](zp), blk["k"](zp), blk["v"](zp)
+
+        def to_patches(t):
+            t = t.view(b, c, hp // p, p, wp // p, p)
+            return t.permute(0, 2, 4, 1, 3, 5).reshape(-1, c, p, p)
+
+        qp, kp, vp = to_patches(q), to_patches(k), to_patches(v)
+        mixed = torch.fft.irfft2(torch.fft.rfft2(qp) * torch.fft.rfft2(kp), s=(p, p))
+        out = mixed * vp
+
+        gh, gw = hp // p, wp // p
+        out = out.view(b, gh, gw, c, p, p).permute(0, 3, 1, 4, 2, 5).reshape(b, c, hp, wp)
+        return out[:, :, :h, :w]
 
     def forward(self, x):
-        b, _, h, w = x.shape
-        win = self.window
-        ph, pw = (-h) % win, (-w) % win
-        z = F.pad(x, (0, pw, 0, ph))
-        z = self.proj_in(z)
-        windows, grid = window_partition(z, win)               # (Bn, r, win, win)
-        bn = windows.shape[0]
-        n_tok = win * win
-        qkv = self.qkv(windows).flatten(2).transpose(1, 2)     # (Bn, N, 3r)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        def split(t):
-            return t.view(bn, n_tok, self.heads, self.r // self.heads).transpose(1, 2)
-
-        q, k, v = split(q), split(k), split(v)
-        attn = ((q @ k.transpose(-2, -1)) * self.scale).softmax(dim=-1)
-        out = (attn @ v).transpose(1, 2).reshape(bn, n_tok, self.r)
-        out = out.transpose(1, 2).reshape(bn, self.r, win, win)
-        out = window_reverse(out, win, grid, b)
-        out = self.proj_out(out)
-        return out[:, :, :h, :w]
+        z = self.proj_in(x)
+        for blk in self.blocks:
+            z = z + self._fft_mix(blk, z)
+        return self.proj_out(z)
 
 
 class MoCELayer(nn.Module):
-    """See the module docstring for the full mechanism and its deviations.
-    `heads` is the block's own head count; each expert gets
-    max(1, heads // 2^i), scaled down the same way its channel width is."""
+    """See the module docstring for the mechanism and its named gaps
+    (router, aux loss)."""
 
-    def __init__(self, c, n_experts=4, heads=4):
+    def __init__(self, c, n_experts=4, heads=1, rank=2, stage_depth=1):
         super().__init__()
         self.n_experts = n_experts
         self.shared = MDTA(c, heads=heads)
+        self.shared_gate = nn.Conv2d(c, c, 1)
+
+        patch_sizes = [2 ** (i + 2) for i in range(n_experts)]      # [4,8,16,32]
+        kernel_sizes = [3 + 2 * i for i in range(n_experts)]        # [3,5,7,9]
+        depths = [stage_depth + i for i in range(n_experts)]        # linear
         self.experts = nn.ModuleList([
-            ComplexityExpert(c, r=max(1, c // (2 ** i)), window=2 ** (1 + i),
-                             heads=max(1, heads // (2 ** i)))
-            for i in range(1, n_experts + 1)])
+            FFTExpert(c, rank, kernel_sizes[i], patch_sizes[i], depths[i])
+            for i in range(n_experts)])
+
         p = torch.tensor([sum(w.numel() for w in e.parameters())
                           for e in self.experts], dtype=torch.float32)
-        self.register_buffer("cost_bias", p / p.max())         # b_i, Eq. 6
+        self.register_buffer("cost_bias", p / p.max())
         self.router = nn.Linear(c, n_experts)
 
     def forward(self, x):
         shared_out, _ = self.shared(x)
+        gate = F.silu(self.shared_gate(shared_out))
 
-        logits = self.router(x.mean((2, 3)))                    # (B, n) -- image-level, Eq. 4
+        logits = self.router(x.mean((2, 3)))
         if self.training:
             logits = logits + torch.randn_like(logits) / (self.n_experts ** 2)
         probs = logits.softmax(dim=-1)
-        choice = probs.argmax(dim=-1)                            # top-1
+        choice = probs.argmax(dim=-1)
 
         out = torch.zeros_like(x)
         for i, expert in enumerate(self.experts):
             mask = choice == i
-            if mask.any():                                       # unselected experts never run
+            if mask.any():
                 out[mask] = expert(x[mask])
 
-        return out * shared_out, self._aux_loss(probs, choice)
+        return out * gate, self._aux_loss(probs, choice)
 
     def _aux_loss(self, probs, choice):
-        """Load-balancing + cost-bias auxiliary loss, Eq. 5-7. Computed and
-        returned; see the module docstring's second deviation for why it is
-        not yet added to any training loss in this codebase."""
         importance = probs.mean(0) * self.cost_bias
         load = torch.bincount(choice, minlength=self.n_experts).float() / choice.numel()
         cv = lambda t: t.std() / (t.mean() + 1e-8)
@@ -260,39 +248,40 @@ class MoCELayer(nn.Module):
 
 
 class Downsample(nn.Module):
+    """PixelUnshuffle(2): C,H,W -> 4C,H/2,W/2, then 1x1 to 2C -- lossless
+    channel-space reshaping, matching the real backbone (not a strided conv)."""
+
     def __init__(self, c):
         super().__init__()
-        self.conv = nn.Conv2d(c, c * 2, 3, 2, 1, bias=False)
+        self.unshuffle = nn.PixelUnshuffle(2)
+        self.proj = nn.Conv2d(c * 4, c * 2, 1, bias=False)
 
     def forward(self, x):
-        return self.conv(x)
+        return self.proj(self.unshuffle(x))
 
 
 class Upsample(nn.Module):
+    """1x1 to 2C, then PixelShuffle(2): 2C,H,W -> C/2,2H,2W."""
+
     def __init__(self, c):
         super().__init__()
-        self.conv = nn.ConvTranspose2d(c, c // 2, 4, 2, 1, bias=False)
+        self.proj = nn.Conv2d(c, c * 2, 1, bias=False)
+        self.shuffle = nn.PixelShuffle(2)
 
     def forward(self, x):
-        return self.conv(x)
+        return self.shuffle(self.proj(x))
 
 
 class MoCEIR(RecoveryModule):
     """See the module docstring for the verified mechanism and every named
-    deviation. `width=None` (this project's usual "published" convention)
-    builds the config below -- there is no separate '-S' config in this port;
-    the paper's -S/full split is a channel-width choice this file has not
-    calibrated to either published parameter count (see the deviations list).
+    gap. `width=None` builds the config below.
     """
 
-    # Verified by construction: 10,030,679 params -- between the paper's
-    # MoCE-IR-S (11.47M) and roughly a third of full MoCE-IR (25.35M), but not
-    # calibrated to match either; see the class docstring's deviations.
-    PUBLISHED = {"width": 32, "enc_depths": (4, 6, 6, 8), "dec_depths": (2, 4, 4),
-                 "n_experts": 4}
+    PUBLISHED = {"width": 32, "enc_depths": (1, 1, 1, 3), "dec_depths": (1, 1, 1),
+                 "n_experts": 4, "rank": 2}
 
-    def __init__(self, width=32, enc_depths=(4, 6, 6, 8), dec_depths=(2, 4, 4),
-                n_experts=4, output=None, **kw):
+    def __init__(self, width=32, enc_depths=(1, 1, 1, 3), dec_depths=(1, 1, 1),
+                n_experts=4, rank=2, output=None, **kw):
         super().__init__(output=output)
         self.stem = nn.Conv2d(3, width, 3, padding=1)
         self.ending = nn.Conv2d(width, 3, 3, padding=1)
@@ -300,22 +289,20 @@ class MoCEIR(RecoveryModule):
         self.encoders, self.downs = nn.ModuleList(), nn.ModuleList()
         c = width
         for depth in enc_depths[:-1]:
-            heads = max(1, c // 32)
             self.encoders.append(nn.Sequential(
-                *[TransformerBlock(c, MDTA(c, heads)) for _ in range(depth)]))
+                *[TransformerBlock(c, MDTA(c, heads=1)) for _ in range(depth)]))
             self.downs.append(Downsample(c))
             c *= 2
-        heads = max(1, c // 32)                                  # bottleneck, no downsample after it
         self.bottleneck = nn.Sequential(
-            *[TransformerBlock(c, MDTA(c, heads)) for _ in range(enc_depths[-1])])
+            *[TransformerBlock(c, MDTA(c, heads=1)) for _ in range(enc_depths[-1])])
 
         self.decoders, self.ups = nn.ModuleList(), nn.ModuleList()
         for depth in dec_depths:
             self.ups.append(Upsample(c))
             c //= 2
-            heads = max(1, c // 32)
             self.decoders.append(nn.Sequential(
-                *[TransformerBlock(c, MoCELayer(c, n_experts, heads)) for _ in range(depth)]))
+                *[TransformerBlock(c, MoCELayer(c, n_experts, heads=1, rank=rank))
+                  for _ in range(depth)]))
         self.pad = 2 ** len(enc_depths[:-1])
         self.aux_loss = 0.0
 

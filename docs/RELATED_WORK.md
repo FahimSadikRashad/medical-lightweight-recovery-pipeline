@@ -55,7 +55,8 @@ to be read before K3's design is finalized, not after.
 |---|---|
 | [**MoCE-IR** — Zamfir et al., CVPR 2025 (arXiv:2411.18466, [code](https://github.com/eduardzamfir/MoCE-IR))](https://arxiv.org/html/2411.18466v1) | **Read this first.** Mixture-of-complexity-experts: expert blocks of *varying computational size*, with a routing signal that biases toward the cheaper expert unless the input's degradation complexity demands more, and bypasses irrelevant experts at inference. Beats OneRestore by 0.64 dB while being among the smallest models compared. "Route between operations by cost" is their contribution, published, at full restoration scale — not an available novelty claim for K3 as stated. |
 | **M2Restore** | MoE Mamba-CNN with a dynamic degradation-aware expert router — same routing idea, different backbone mixture. |
-| ClusIR, SLER-IR, UniRestorer (ICLR 2026), RBaIR, channel-wise functional decomposition for degradation-agnostic IR | The same routing/expert-selection line, different granularity (cluster-guided, spherical layer-wise, mixture-of-conv-experts). Worth a pass to see which one's specific mechanism is closest to what K3 was going to do, since that is the one whose difference has to be named explicitly. |
+| [**ClusIR** (arXiv:2512.10948)](https://arxiv.org/abs/2512.10948) | PCGRM (cluster-prototype-guided routing) is another entry in this same routing line. Its **DAFMM** (Degradation-Aware Frequency Modulation Module) is a different animal — frequency-domain modulation, not routing — and is the direct source for `mechanisms.py`'s `freq_modulate` variant (S6), a stripped-down FFT low/high-band gate. Cite DAFMM specifically for that mechanism, not the paper's routing contribution. |
+| SLER-IR, UniRestorer (ICLR 2026), RBaIR | The same routing/expert-selection line, different granularity (spherical layer-wise, mixture-of-conv-experts). Worth a pass to see which one's specific mechanism is closest to what K3 was going to do. |
 | [**A Survey on All-in-One Image Restoration** — Jiang et al., TPAMI 2025, vol. 47(12)](https://arxiv.org/) | Best entry point for this whole line: taxonomy, evaluation protocol, and a curated comparison repo. Did not exist in the original reading list above and should be read before re-deriving the taxonomy from scratch. |
 
 **What survives.** All of the above route at the scale of ordinary restoration
@@ -66,6 +67,29 @@ answered yes — but **whether cost-aware routing between experts is even
 affordable when the experts themselves are a few thousand parameters each**,
 where the router's own cost might dominate the thing it is supposed to save.
 That reframing is the one K3 can still claim; "we invented routing" cannot.
+
+**A second, rival efficiency strategy — not routing at all.** [**MIRAGE**
+— Ren et al., ICLR 2026 (arXiv:2505.18679)](https://arxiv.org/abs/2505.18679),
+the paper behind the table shared in this project's own review deck, was
+misfiled in an earlier pass of this note as another routing method. It is
+not. MIRAGE splits every block's channels into three FIXED thirds — conv,
+attention, MLP — and runs **all three every forward pass**, fused by a
+gated inter-branch mix (its own Algorithm 1). No router, no top-1 selection,
+no bypassed compute; efficiency comes from never giving any one mechanism the
+full channel width, not from skipping work conditionally. It beats full
+MoCE-IR (25.35M, 75G FLOPs) at 6.21M params / 16G FLOPs specifically WITHOUT
+routing, which is direct evidence that dynamic routing is not necessary to
+win this comparison — a genuine rival hypothesis to MoCE-IR's premise, and
+one K3 has to pick a side of rather than ignore. Two things worth reusing
+independently of that debate:
+  - Its ablation (Table 7) shows every ablated variant of the decomposition
+    is BOTH more expensive AND worse than the full method — the decomposition
+    itself is buying the efficiency, not just correlating with it.
+  - Its SPD-manifold contrastive regularizer (shallow vs. latent features,
+    aligned via covariance structure rather than Euclidean distance) is
+    architecture-agnostic and costs NOTHING at inference — it is a pure
+    training-time addition, portable to any arm already in this repo without
+    touching parameter count or latency at all.
 
 ---
 
@@ -212,3 +236,4 @@ Fill this in as you read; it prevents unsupported sentences later.
 | Recovery is classifier-coupled | task-network bias, discussed in arXiv:2404.01692 |
 | MedViT as the second frozen backbone | Manzari et al. 2023 — cite the paper's own robustness argument, not just the architecture |
 | K3 does not claim to invent cost-aware routing | MoCE-IR (CVPR 2025) and the routing-line papers above — cite as prior art, reframe K3's claim |
+| Routing isn't the only rival efficiency strategy | MIRAGE (ICLR 2026) beats MoCE-IR with static parallel decomposition, no routing at all — K3 must argue against this alternative too, not just against routing |

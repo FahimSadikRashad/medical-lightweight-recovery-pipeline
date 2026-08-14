@@ -71,10 +71,10 @@ if __name__ == "__main__":
         seed={"type": int, "default": 0},
         batch_size={"type": int, "default": None,
                     "help": "override config.BATCH_SIZE for training only. "
-                            "moceir measured 7.7GB peak RSS at batch=2, 224px, "
-                            "CPU (robustmed/moceir.py's deviations list) -- "
-                            "the project default of 128 will exhaust memory. "
-                            "Use 4-8 whenever 'moceir' is in --arms."},
+                            "moceir measured 7.47GB peak RSS at batch=8, 224px "
+                            "(robustmed/moceir.py's verified numbers) -- the "
+                            "project default of 128 will exhaust memory. "
+                            "Use 8 whenever 'moceir' is in --arms."},
         eval_limit={"type": int, "default": None,
                     "help": "cap TEST/VAL images for the corruption cache -- "
                             "see 13_module_comparison.py's flag of the same name"},
@@ -122,8 +122,9 @@ if __name__ == "__main__":
         print("\n!! 'moceir' is in --arms with no --batch-size override -- it "
               "will train at config.BATCH_SIZE "
               f"({config.BATCH_SIZE}) and is very likely to exhaust memory "
-              "(see robustmed/moceir.py's deviations list: 7.7GB measured at "
-              "batch=2, 224px, CPU). Pass --batch-size 4, or expect this to fail.")
+              "(see robustmed/moceir.py: 7.47GB measured at batch=8, 224px; "
+              "batch=16 already fails). Pass --batch-size 8, or expect this "
+              "to fail.")
 
     pair_loader = data.loader(
         data.Pairs(train, all_families, list(range(config.N_SEVERITIES))),

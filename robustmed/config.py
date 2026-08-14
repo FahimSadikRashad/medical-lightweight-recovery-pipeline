@@ -145,6 +145,24 @@ TRAIN_CORRUPTIONS = ["gaussian_noise", "gaussian_blur", "jpeg_compression"]
 TRAIN_SEVERITIES = [0, 1, 2]
 HOLDOUT_SEVERITY = 4          # never seen while training recovery
 
+# --- deployable-scale tier ---------------------------------------------------
+# The capacity sweep had a hole: AE_WIDTHS tops out at 14K-53K params, then
+# "published" jumps straight to hundreds of K (dncnn/span/safmn) or tens of M
+# (nafnet, moceir) -- nothing measures what the WINNING mechanism (multi-scale
+# downsampling, RQ-3) does when given real headroom, or whether NAFNet's own
+# multi-scale design works once it isn't pushed to a scale that destabilizes
+# it (29M NAFNet collapses under CE guidance -- see docs/RQ_PAPER_MAP.md).
+#
+# These two width pairs are budget-matched by construction, verified via
+# count_params, not estimated:
+#   tier   convae width->params   nafnet width->params   gap
+#   ~500K  96 -> 468,387          4 -> 491,495            4.7%
+#   ~1.9M  192 -> 1,858,371       8 -> 1,883,979           1.4%
+# Widths only -- NAFNet keeps its PUBLISHED depths (enc_blks/middle_blks/
+# dec_blks) at every width here, since the depth structure IS the multi-scale
+# mechanism under test; only channel width scales down.
+DEPLOYABLE_WIDTHS = {"convae": [96, 192], "nafnet": [4, 8]}
+
 # --- corruption taxonomy ---------------------------------------------------
 # MedMNIST-C registries are modality-specific and share almost nothing by NAME:
 # across the 12 registries only contrast_down, jpeg_compression and pixelate are

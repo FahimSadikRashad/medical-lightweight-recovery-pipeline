@@ -21,10 +21,10 @@ Start here when resuming. Every stage writes a JSON file to
 **Stage 16 needs `13_module_comparison.py --published` run first** for the
 H-M2 comparison column (classifier-free mCE vs. the CE-guided mCE for the same
 architecture at the same published size) — otherwise it reports restoration
-quality alone. `--arms moceir` requires `--batch-size 4` or smaller; see
-[`robustmed/moceir.py`](../robustmed/moceir.py)'s deviations list for why
-(7.7GB measured at batch=2, 224px, CPU, backward pass — the project's default
-batch of 128 will exhaust memory).
+quality alone. `--arms moceir` requires `--batch-size 8`; see
+[`robustmed/moceir.py`](../robustmed/moceir.py)'s verified numbers (3.37M
+params, 7.47GB RSS at batch=8/224px, batch=16 already fails — the project's
+default batch of 128 will exhaust memory regardless).
 
 **The numbers in `FINDINGS.md` came from the original unseeded Colab run.** The
 restructured code seeds every RNG, so a rerun will not reproduce them digit for

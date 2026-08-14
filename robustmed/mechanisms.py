@@ -22,11 +22,24 @@ test even though the published architecture did not.
     S3  channel_attention  global avg pool -> 1x1 -> multiply   NAFNet SCA
     S4  safm               multi-level pooling modulation       SAFMN
     S5  simple_gate        channel split -> multiply            NAFNet
+    S6  freq_modulate      FFT low/high-band gate, then iFFT    ClusIR DAFMM
 
 Read S3 vs S4 first. Photometric corruption is a global intensity remap and the
 binding category; S3 is the only mechanism with a purely global receptive field,
 S4 is global-ish plus spatially selective. Stage 2a suggested S4 wins that
 contest, and this is the controlled test of it.
+
+S6 is a different bet on the same question. S3/S4 are still spatial operations
+applied globally or semi-globally; a uniform brightness/contrast/gamma shift is
+not a spatial pattern at all -- it is almost entirely energy in the DC / lowest
+frequency bins. S6 gates the low-frequency and high-frequency halves of the
+spectrum with separate learned scalars per channel, inspired by ClusIR's
+Degradation-Aware Frequency Modulation Module (arXiv:2512.10948) but stripped
+to this skeleton's budget: no clustering, no cross-frequency attention, just a
+per-band gate. If S3/S4's global-but-spatial mechanisms are the reason
+photometric gain has stayed negative everywhere, an operation that acts on
+frequency directly should do better; if it does not, the gap is not about
+"global vs local" at all and needs a different explanation.
 """
 import torch
 import torch.nn as nn
@@ -35,7 +48,7 @@ import torch.nn.functional as F
 from .models import RecoveryModule
 
 MECHANISMS = ("plain", "multiscale", "pf_attention", "channel_attention",
-              "safm", "simple_gate")
+              "safm", "simple_gate", "freq_modulate")
 
 
 class _Block(nn.Module):
@@ -60,6 +73,13 @@ class _Block(nn.Module):
             self.proj = nn.Conv2d(c, c, 1)
         elif mechanism == "simple_gate":
             self.expand = nn.Conv2d(c, c * 2, 1)
+        elif mechanism == "freq_modulate":
+            # One learned scalar per channel per band -- deliberately the
+            # cheapest possible frequency-domain op, so any gain is
+            # attributable to acting in frequency space at all, not to
+            # capacity spent modelling the spectrum in detail.
+            self.freq_low = nn.Parameter(torch.ones(1, c, 1, 1))
+            self.freq_high = nn.Parameter(torch.ones(1, c, 1, 1))
 
     def forward(self, x):
         h = F.relu(self.conv1(x))
@@ -86,6 +106,20 @@ class _Block(nn.Module):
         if m == "simple_gate":
             a, b = self.expand(h).chunk(2, dim=1)
             return x + a * b
+        if m == "freq_modulate":
+            hh, ww = h.shape[-2:]
+            spec = torch.fft.rfft2(h, norm="ortho")
+            # Proper FFT frequency coordinates (fftfreq/rfftfreq), not a
+            # naive linear grid -- rfft2's non-transformed axis follows
+            # standard FFT ordering (0..Nyquist, then wraps negative), and a
+            # linspace over it would put "low frequency" in the wrong place.
+            fy = torch.fft.fftfreq(hh, device=h.device).view(-1, 1)
+            fx = torch.fft.rfftfreq(ww, device=h.device).view(1, -1)
+            radius = torch.sqrt(fy ** 2 + fx ** 2)
+            low = (radius < radius.mean()).float()
+            gate = low * self.freq_low + (1.0 - low) * self.freq_high
+            out = torch.fft.irfft2(spec * gate, s=(hh, ww), norm="ortho")
+            return x + out
         return x + h                                        # plain, multiscale
 
 

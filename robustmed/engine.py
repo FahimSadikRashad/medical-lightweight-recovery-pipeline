@@ -582,16 +582,40 @@ def train_restoration(width, pair_loader, val_cache, epochs=config.AE_EPOCHS,
 
     for ep in range(epochs):
         ae.train()
-        total, seen = 0.0, 0
+        total, seen, skipped = 0.0, 0, 0
         for cor, clean, _y in pair_loader:
             cor, clean = cor.to(DEVICE), clean.to(DEVICE)
             out = ae(cor)
             loss = l1(out, clean) + ssim_weight * (1.0 - ssim_fn(out, clean))
+            if not torch.isfinite(loss):
+                # Unlike train_recovery, this loss never sees a lambda ramp
+                # easing it in from 0 -- a fresh, untested architecture (e.g.
+                # MoCEIR's FFT-mixing experts) can diverge to Inf/NaN in the
+                # first few batches at random init, before any gradient clip
+                # existed to catch it. Skip the step rather than let a NaN
+                # loss.backward() poison every weight in the model -- once
+                # that happens every subsequent batch is NaN too, which is
+                # indistinguishable from "training failed" instead of "one
+                # bad batch got skipped".
+                skipped += 1
+                opt.zero_grad()
+                continue
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(ae.parameters(), max_norm=1.0)
             opt.step()
             total += loss.item() * cor.size(0)
             seen += cor.size(0)
+        if skipped:
+            print(f"  [{label}] ep{ep + 1}: skipped {skipped} non-finite batch(es)",
+                  flush=True)
+        if seen == 0:
+            print(f"  [{label}] ep{ep + 1}: EVERY batch was non-finite -- "
+                  f"the model is not recovering from this on its own. Lower "
+                  f"--lr or check the arch's init before continuing.", flush=True)
+            history.append({"epoch": ep + 1, "loss": float("nan"),
+                            "val_psnr": float("nan"), "val_ssim": float("nan")})
+            continue
 
         q = probe_restoration_quality(ae, val_cache, batch_size=probe_batch_size)
         row = {"epoch": ep + 1, "loss": total / seen,

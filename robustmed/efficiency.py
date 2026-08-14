@@ -70,11 +70,23 @@ def latency_ms(model, device, batch=1, iters=50, warmup=10, threads=None):
 
     `threads=1` gives the single-thread CPU figure, which is the number that
     matters for edge deployment and the one most papers omit.
+
+    Moves `model` to `device` for the benchmark and restores it afterward.
+    Without this, profile()'s own "cpu_1thread_bs1" call -- which deliberately
+    passes torch.device("cpu") for a model that is living on CUDA, precisely
+    to measure its CPU cost -- builds its input tensor on CPU while the
+    model's weights stay on CUDA, and every conv raises "Input type
+    (torch.FloatTensor) and weight type (torch.cuda.FloatTensor) should be
+    the same". The caller's model must come back on its original device:
+    profile() keeps using it afterward for the classifier comparison.
     """
     px = config.IMAGE_SIZE
     prev = torch.get_num_threads()
     if threads:
         torch.set_num_threads(threads)
+    orig_device = _module_device(model) if model is not None else None
+    if model is not None and orig_device != device:
+        model.to(device)
     try:
         x = torch.randn(batch, 3, px, px, device=device)
         run = (lambda: x) if model is None else (lambda: model(x))
@@ -97,6 +109,8 @@ def latency_ms(model, device, batch=1, iters=50, warmup=10, threads=None):
         return total / iters / batch
     finally:
         torch.set_num_threads(prev)
+        if model is not None and orig_device != device:
+            model.to(orig_device)
 
 
 @torch.no_grad()
